@@ -2081,7 +2081,7 @@ class SQLiteHandler:
     # The list queries leave the raw frame out by default: at ~120 bytes a row
     # it dominates a bulk page, and most consumers only read the parsed
     # fields. A client that decodes packets itself asks for it explicitly.
-    _PACKET_LIST_SELECT = (
+    _PACKET_LIST_SELECT_PLAIN = (
         "SELECT id, "
         "timestamp, type, route, length, rssi, snr, score, "
         "transmitted, is_duplicate, drop_reason, src_hash, dst_hash, path_hash, "
@@ -2089,10 +2089,13 @@ class SQLiteHandler:
         "transport_codes, payload, payload_length, "
         "tx_delay_ms, rx_radio_id, tx_radio_id, "
         "packet_hash, original_path, forwarded_path, "
-        "lbt_attempts, lbt_channel_busy"
+        "lbt_attempts, lbt_channel_busy "
+        "FROM packets"
     )
-    _PACKET_LIST_SELECT_PLAIN = _PACKET_LIST_SELECT + " FROM packets"
-    _PACKET_LIST_SELECT_RAW = _PACKET_LIST_SELECT + ", raw_packet FROM packets"
+    # The same statement with the frame as its last column.
+    _PACKET_LIST_SELECT_RAW = _PACKET_LIST_SELECT_PLAIN.replace(
+        " FROM packets", ", raw_packet FROM packets"
+    )
 
     @classmethod
     def _packet_list_select(cls, include_raw: bool) -> str:

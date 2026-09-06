@@ -3962,7 +3962,13 @@ class APIEndpoints:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     def filtered_packets(
-        self, start_timestamp=None, end_timestamp=None, limit=1000, type=None, route=None
+        self,
+        start_timestamp=None,
+        end_timestamp=None,
+        limit=1000,
+        type=None,
+        route=None,
+        include_raw=None,
     ):
         # Handle OPTIONS request for CORS preflight
         if cherrypy.request.method == "OPTIONS":
@@ -3983,6 +3989,7 @@ class APIEndpoints:
                 start_timestamp=start_ts,
                 end_timestamp=end_ts,
                 limit=limit_int,
+                include_raw=_flag(include_raw),
             )
             return self._success(
                 packets,

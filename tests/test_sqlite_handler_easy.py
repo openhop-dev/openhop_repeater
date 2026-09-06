@@ -373,6 +373,13 @@ def test_packet_list_queries_add_raw_frame_only_on_request(tmp_path):
     assert filtered[0]["raw_packet"] == "0901aa55"
     assert recent[0]["packet_hash"] == filtered[0]["packet_hash"] == "with-frame"
 
+    # The path bulk_packets takes: a time window AND the flag, on one statement.
+    windowed = h.get_filtered_packets(
+        start_timestamp=50.0, end_timestamp=150.0, limit=10, include_raw=True
+    )
+    assert [row["raw_packet"] for row in windowed] == ["0901aa55"]
+    assert h.get_filtered_packets(start_timestamp=200.0, limit=10, include_raw=True) == []
+
 
 def test_verify_api_token_last_used_throttle(tmp_path, monkeypatch):
     h = _make_handler(tmp_path)

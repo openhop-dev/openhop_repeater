@@ -1112,7 +1112,19 @@ def test_filtered_packets_options_and_success(cherrypy_ctx):
         start_timestamp=10.0,
         end_timestamp=20.0,
         limit=5,
+        include_raw=False,
     )
+
+
+def test_filtered_packets_include_raw_flag(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    storage = SimpleNamespace(get_filtered_packets=MagicMock(return_value=[]))
+    _attach_storage(api, storage)
+
+    api.filtered_packets(limit="5", include_raw="yes")
+
+    assert storage.get_filtered_packets.call_args.kwargs["include_raw"] is True
 
 
 def test_filtered_packets_invalid_parameter_format(cherrypy_ctx):

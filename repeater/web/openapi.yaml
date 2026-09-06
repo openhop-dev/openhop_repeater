@@ -1001,6 +1001,12 @@ paths:
             type: integer
             default: 1000
           description: Maximum results
+        - name: include_raw
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Add each packet's raw frame (raw_packet, hex) to the rows
       responses:
         '200':
           description: Filtered packets
