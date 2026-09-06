@@ -308,6 +308,75 @@ def test_neighbor_link_history_uses_packets_table_and_filters_hash_and_size(tmp_
     assert rows[1]["is_duplicate"] is True
 
 
+def _store_link_observation(h, ts, *, score, rssi, snr, duplicate=False, hash_="AA"):
+    h.store_packet(
+        {
+            "timestamp": ts,
+            "type": 4,
+            "route": 1,
+            "length": 10,
+            "rssi": rssi,
+            "snr": snr,
+            "score": score,
+            "is_duplicate": duplicate,
+            "packet_hash": f"pkt-{ts}",
+            "upstream_hash": hash_,
+            "upstream_hash_size": 1,
+            "original_path": [hash_],
+        }
+    )
+
+
+def test_neighbor_link_history_pages_with_since_and_before(tmp_path):
+    h = _make_handler(tmp_path)
+    base = 1_700_000_000.0
+    for i in range(6):
+        _store_link_observation(h, base + i * 10, score=0.5, rssi=-90, snr=1.0)
+
+    def stamps(**kwargs):
+        rows = h.get_neighbor_link_history(peer_hash="AA", path_hash_size=1, hours=50000, **kwargs)
+        return [row["timestamp"] - base for row in rows]
+
+    # A full page is the newest rows; the page before it ends where that one began.
+    assert stamps(limit=4) == [20, 30, 40, 50]
+    assert stamps(limit=4, before=base + 20) == [0, 10]
+    # `since` is inclusive, so a refresh from the newest row held returns it again.
+    assert stamps(since=base + 40) == [40, 50]
+    assert stamps(since=base + 10, before=base + 40) == [10, 20, 30]
+
+
+def test_neighbor_link_history_buckets_summarise_the_raw_rows(tmp_path):
+    h = _make_handler(tmp_path)
+    t0 = 1_700_000_400.0  # a 600 s boundary
+    _store_link_observation(h, t0 + 5, score=0.2, rssi=-100, snr=-2.0)
+    _store_link_observation(h, t0 + 300, score=0.6, rssi=-80, snr=4.0, duplicate=True)
+    _store_link_observation(h, t0 + 599, score=0.4, rssi=-90, snr=1.0)
+    _store_link_observation(h, t0 + 1300, score=0.9, rssi=-70, snr=8.0)
+    # Another peer in the same bucket must not be counted.
+    _store_link_observation(h, t0 + 10, score=0.0, rssi=-120, snr=-9.0, hash_="BB")
+
+    buckets = h.get_neighbor_link_history(peer_hash="AA", path_hash_size=1, hours=50000, bucket=600)
+
+    assert [(b["t0"], b["t1"]) for b in buckets] == [(t0, t0 + 600), (t0 + 1200, t0 + 1800)]
+    first, second = buckets
+    assert (first["n"], first["dup"]) == (3, 1)
+    assert (first["first_ts"], first["last_ts"]) == (t0 + 5, t0 + 599)
+    assert (first["score_min"], first["score_mean"], first["score_max"]) == (0.2, 0.4, 0.6)
+    assert (first["rssi_min"], first["rssi_mean"], first["rssi_max"]) == (-100, -90.0, -80)
+    assert (first["snr_min"], first["snr_mean"], first["snr_max"]) == (-2.0, 1.0, 4.0)
+    assert (second["n"], second["dup"], second["score_mean"]) == (1, 0, 0.9)
+
+    # Bounds and the limit apply to buckets the way they apply to rows.
+    older = h.get_neighbor_link_history(
+        peer_hash="AA", path_hash_size=1, hours=50000, bucket=600, before=t0 + 1200
+    )
+    assert [b["t0"] for b in older] == [t0]
+    newest = h.get_neighbor_link_history(
+        peer_hash="AA", path_hash_size=1, hours=50000, bucket=600, limit=1
+    )
+    assert [b["t0"] for b in newest] == [t0 + 1200]
+
+
 def test_recent_packet_queries_include_ids_and_preserve_duplicate_hash_rows(tmp_path):
     h = _make_handler(tmp_path)
 

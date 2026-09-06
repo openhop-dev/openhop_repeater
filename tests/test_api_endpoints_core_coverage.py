@@ -1020,11 +1020,61 @@ def test_neighbor_link_history_endpoint_filters_by_hash_and_size(cherrypy_ctx):
     assert result["data"]["hours"] == 12
     assert result["data"]["limit"] == 50
     assert result["data"]["rows"] == rows
+    assert result["data"]["has_more"] is False
     storage.get_neighbor_link_history.assert_called_once_with(
         peer_hash="ab",
         path_hash_size=2,
         hours=12,
         limit=50,
+        before=None,
+        since=None,
+        bucket=None,
+    )
+
+
+def test_neighbor_link_history_endpoint_pages_and_buckets(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    rows = [{"timestamp": 100.0}, {"timestamp": 200.0}]
+    storage = SimpleNamespace(get_neighbor_link_history=MagicMock(return_value=rows))
+    _attach_storage(api, storage)
+
+    result = api.neighbor_link_history(
+        peer_hash="ab", path_hash_size="1", limit="2", before="300", since="50"
+    )
+
+    data = result["data"]
+    assert data["rows"] == rows
+    assert (data["count"], data["has_more"]) == (2, True)
+    assert (data["oldest"], data["newest"]) == (100.0, 200.0)
+    storage.get_neighbor_link_history.assert_called_once_with(
+        peer_hash="ab",
+        path_hash_size=1,
+        hours=24,
+        limit=2,
+        before=300.0,
+        since=50.0,
+        bucket=None,
+    )
+
+    buckets = [{"t0": 600, "t1": 1200}, {"t0": 1200, "t1": 1800}]
+    storage.get_neighbor_link_history = MagicMock(return_value=buckets)
+    result = api.neighbor_link_history(peer_hash="ab", path_hash_size="1", bucket="600")
+
+    data = result["data"]
+    assert "rows" not in data
+    assert (data["bucket"], data["buckets"]) == (600, buckets)
+    assert (data["oldest"], data["newest"], data["has_more"]) == (600, 1200, False)
+    assert storage.get_neighbor_link_history.call_args.kwargs["bucket"] == 600
+
+    # An empty window answers with null bounds rather than an error.
+    storage.get_neighbor_link_history = MagicMock(return_value=[])
+    data = api.neighbor_link_history(peer_hash="ab", path_hash_size="1")["data"]
+    assert (data["count"], data["oldest"], data["newest"], data["has_more"]) == (
+        0,
+        None,
+        None,
+        False,
     )
 
 

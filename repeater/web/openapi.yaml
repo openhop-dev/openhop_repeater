@@ -1071,7 +1071,26 @@ paths:
             default: 1000
             minimum: 1
             maximum: 5000
-          description: Maximum rows to return.
+          description: Maximum rows (or buckets) to return.
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: number
+          description: Only observations at or after this Unix timestamp. Set it to the newest timestamp held to fetch what is new.
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: number
+          description: Only observations before this Unix timestamp (exclusive). Set it to `oldest` to page backward through the window.
+        - name: bucket
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 60
+          description: Bucket width in seconds. When given, the answer carries one summary per non-empty bucket (aligned to the epoch) in `buckets` instead of `rows`.
       responses:
         '200':
           description: Neighbour link history
@@ -5271,10 +5290,80 @@ components:
           type: integer
         rows:
           type: array
+          description: Observations, oldest first. Absent when `bucket` was requested.
           items:
             $ref: '#/components/schemas/NeighborLinkHistoryRow'
+        bucket:
+          type: integer
+          description: Bucket width in seconds. Present only when `bucket` was requested.
+        buckets:
+          type: array
+          description: One summary per non-empty bucket, oldest first. Present only when `bucket` was requested.
+          items:
+            $ref: '#/components/schemas/NeighborLinkHistoryBucket'
         count:
           type: integer
+        has_more:
+          type: boolean
+          description: True when the answer filled `limit`, so older entries may remain. Ask again with `before` set to `oldest`.
+        oldest:
+          type: number
+          nullable: true
+          description: Timestamp of the oldest row, or `t0` of the oldest bucket. Null when the answer is empty.
+        newest:
+          type: number
+          nullable: true
+          description: Timestamp of the newest row, or `t0` of the newest bucket. Null when the answer is empty.
+
+    NeighborLinkHistoryBucket:
+      type: object
+      description: Summary of one bucket of observations. Means are rounded to three decimals.
+      properties:
+        t0:
+          type: integer
+          description: Bucket start (Unix timestamp, inclusive).
+        t1:
+          type: integer
+          description: Bucket end (Unix timestamp, exclusive).
+        n:
+          type: integer
+          description: Observations in the bucket.
+        dup:
+          type: integer
+          description: Observations flagged as duplicates.
+        first_ts:
+          type: number
+          description: Timestamp of the first observation in the bucket.
+        last_ts:
+          type: number
+          description: Timestamp of the last observation in the bucket.
+        score_min:
+          type: number
+          nullable: true
+        score_mean:
+          type: number
+          nullable: true
+        score_max:
+          type: number
+          nullable: true
+        rssi_min:
+          type: number
+          nullable: true
+        rssi_mean:
+          type: number
+          nullable: true
+        rssi_max:
+          type: number
+          nullable: true
+        snr_min:
+          type: number
+          nullable: true
+        snr_mean:
+          type: number
+          nullable: true
+        snr_max:
+          type: number
+          nullable: true
 
     NeighborLinkHistoryResponse:
       type: object
