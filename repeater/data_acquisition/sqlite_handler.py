@@ -2331,7 +2331,17 @@ class SQLiteHandler:
         path_hash_size: int,
         hours: int = 24,
         limit: int = 1000,
+        before: Optional[float] = None,
+        since: Optional[float] = None,
+        bucket: Optional[int] = None,
     ) -> list:
+        """Observations of one upstream peer within the window, oldest first.
+
+        ``since`` (inclusive) and ``before`` (exclusive) narrow the window so a
+        client can page backward through it or fetch only what is new. With
+        ``bucket`` (seconds) the observations are summarised per time bucket,
+        aligned to the epoch, instead of returned one by one.
+        """
         try:
             normalized_hash = str(peer_hash or "").strip().upper()
             if not normalized_hash:
@@ -2340,10 +2350,18 @@ class SQLiteHandler:
             path_hash_size = int(path_hash_size)
             hours = max(1, int(hours))
             limit = max(1, min(int(limit), 5000))
-            cutoff = time.time() - (hours * 3600)
+            start = time.time() - (hours * 3600)
+            if since is not None:
+                start = max(start, float(since))
+            end = float(before) if before is not None else None
 
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
+                if bucket is not None:
+                    return self._bucket_neighbor_link_history(
+                        conn, normalized_hash, path_hash_size, start, end, int(bucket), limit
+                    )
+
                 rows = conn.execute(
                     """
                     SELECT
@@ -2360,10 +2378,11 @@ class SQLiteHandler:
                     WHERE upstream_hash = ?
                       AND upstream_hash_size = ?
                       AND timestamp >= ?
+                      AND (? IS NULL OR timestamp < ?)
                     ORDER BY timestamp DESC
                     LIMIT ?
                     """,
-                    (normalized_hash, path_hash_size, cutoff, limit),
+                    (normalized_hash, path_hash_size, start, end, end, limit),
                 ).fetchall()
 
                 history = []
@@ -2397,6 +2416,76 @@ class SQLiteHandler:
         except Exception as e:
             logger.error(f"Failed to get neighbor link history: {e}")
             return []
+
+    @staticmethod
+    def _bucket_neighbor_link_history(
+        conn,
+        peer_hash: str,
+        path_hash_size: int,
+        start: float,
+        end: Optional[float],
+        bucket: int,
+        limit: int,
+    ) -> list:
+        """One summary per non-empty bucket of ``bucket`` seconds, oldest first."""
+        bucket = max(1, bucket)
+        rows = conn.execute(
+            """
+            SELECT
+                CAST(timestamp / ? AS INTEGER) * ? AS t0,
+                COUNT(*) AS n,
+                SUM(is_duplicate) AS dup,
+                MIN(timestamp) AS first_ts,
+                MAX(timestamp) AS last_ts,
+                MIN(score) AS score_min,
+                AVG(score) AS score_mean,
+                MAX(score) AS score_max,
+                MIN(rssi) AS rssi_min,
+                AVG(rssi) AS rssi_mean,
+                MAX(rssi) AS rssi_max,
+                MIN(snr) AS snr_min,
+                AVG(snr) AS snr_mean,
+                MAX(snr) AS snr_max
+            FROM packets INDEXED BY idx_packets_upstream_time
+            WHERE upstream_hash = ?
+              AND upstream_hash_size = ?
+              AND timestamp >= ?
+              AND (? IS NULL OR timestamp < ?)
+            GROUP BY t0
+            ORDER BY t0 DESC
+            LIMIT ?
+            """,
+            (bucket, bucket, peer_hash, path_hash_size, start, end, end, limit),
+        ).fetchall()
+
+        def mean(value):
+            return None if value is None else round(value, 3)
+
+        buckets = []
+        for row in rows:
+            t0 = int(row["t0"])
+            buckets.append(
+                {
+                    "t0": t0,
+                    "t1": t0 + bucket,
+                    "n": int(row["n"]),
+                    "dup": int(row["dup"]),
+                    "first_ts": row["first_ts"],
+                    "last_ts": row["last_ts"],
+                    "score_min": row["score_min"],
+                    "score_mean": mean(row["score_mean"]),
+                    "score_max": row["score_max"],
+                    "rssi_min": row["rssi_min"],
+                    "rssi_mean": mean(row["rssi_mean"]),
+                    "rssi_max": row["rssi_max"],
+                    "snr_min": row["snr_min"],
+                    "snr_mean": mean(row["snr_mean"]),
+                    "snr_max": row["snr_max"],
+                }
+            )
+
+        buckets.reverse()
+        return buckets
 
     def get_packet_type_stats(self, hours: int = 24) -> dict:
         try:

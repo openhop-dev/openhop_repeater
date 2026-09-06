@@ -3861,7 +3861,16 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def neighbor_link_history(self, peer_hash=None, path_hash_size=None, hours=24, limit=1000):
+    def neighbor_link_history(
+        self,
+        peer_hash=None,
+        path_hash_size=None,
+        hours=24,
+        limit=1000,
+        before=None,
+        since=None,
+        bucket=None,
+    ):
         try:
             if not peer_hash:
                 return self._error("peer_hash parameter required")
@@ -3870,24 +3879,38 @@ class APIEndpoints:
 
             size = int(path_hash_size)
             window_hours = int(hours)
-            row_limit = int(limit)
+            row_limit = max(1, min(int(limit), 5000))
+            before_ts = float(before) if before is not None else None
+            since_ts = float(since) if since is not None else None
+            bucket_seconds = max(60, int(bucket)) if bucket is not None else None
 
             rows = self._get_storage().get_neighbor_link_history(
                 peer_hash=str(peer_hash),
                 path_hash_size=size,
                 hours=window_hours,
                 limit=row_limit,
+                before=before_ts,
+                since=since_ts,
+                bucket=bucket_seconds,
             )
-            return self._success(
-                {
-                    "peer_hash": str(peer_hash).upper(),
-                    "path_hash_size": size,
-                    "hours": window_hours,
-                    "limit": row_limit,
-                    "rows": rows,
-                    "count": len(rows),
-                }
-            )
+            stamp = "t0" if bucket_seconds is not None else "timestamp"
+            data = {
+                "peer_hash": str(peer_hash).upper(),
+                "path_hash_size": size,
+                "hours": window_hours,
+                "limit": row_limit,
+                "count": len(rows),
+                # A full page may hide older observations: ask again with before=oldest.
+                "has_more": len(rows) >= row_limit,
+                "oldest": rows[0].get(stamp) if rows else None,
+                "newest": rows[-1].get(stamp) if rows else None,
+            }
+            if bucket_seconds is not None:
+                data["bucket"] = bucket_seconds
+                data["buckets"] = rows
+            else:
+                data["rows"] = rows
+            return self._success(data)
         except ValueError as e:
             return self._error(f"Invalid parameter format: {e}")
         except Exception as e:
