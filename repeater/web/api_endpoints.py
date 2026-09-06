@@ -45,6 +45,13 @@ from .plugin_endpoints import PluginAPIEndpoints
 from .update_endpoints import UpdateAPIEndpoints
 
 logger = logging.getLogger("HTTPServer")
+
+
+def _flag(value) -> bool:
+    """Read an opt-in query flag: ``1``, ``true`` or ``yes`` (any case) turn it on."""
+    return value is not None and str(value).lower() in ("1", "true", "yes")
+
+
 REDACTED_CONFIG_VALUE = "*** REDACTED ***"
 
 POLICY_GROUP_KINDS = {
@@ -3896,10 +3903,12 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def recent_packets(self, limit=100):
+    def recent_packets(self, limit=100, include_raw=None):
         try:
             limit = int(limit)
-            packets = self._get_storage().get_recent_packets(limit=limit)
+            packets = self._get_storage().get_recent_packets(
+                limit=limit, include_raw=_flag(include_raw)
+            )
             return self._success(packets, count=len(packets))
         except Exception as e:
             logger.error(f"Error getting recent packets: {e}")
@@ -3908,9 +3917,14 @@ class APIEndpoints:
     @cherrypy.expose
     @cherrypy.tools.gzip(compress_level=6)
     @cherrypy.tools.json_out()
-    def bulk_packets(self, limit=1000, offset=0, start_timestamp=None, end_timestamp=None):
+    def bulk_packets(
+        self, limit=1000, offset=0, start_timestamp=None, end_timestamp=None, include_raw=None
+    ):
         """
         Optimized bulk packet retrieval with gzip compression and DB-level pagination.
+
+        ``include_raw=1`` adds each packet's raw frame (``raw_packet``) to the
+        rows, for clients that decode packets themselves.
         """
         try:
             # Enforce reasonable limits
@@ -3927,6 +3941,7 @@ class APIEndpoints:
                 end_timestamp=float(end_timestamp) if end_timestamp else None,
                 limit=limit,
                 offset=offset,
+                include_raw=_flag(include_raw),
             )
 
             response = {

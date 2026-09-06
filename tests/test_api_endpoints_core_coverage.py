@@ -1048,7 +1048,7 @@ def test_recent_packets_and_bulk_packets(cherrypy_ctx):
     assert bulk["limit"] == 10000
     assert bulk["compressed"] is True
 
-    storage.get_recent_packets.assert_called_once_with(limit=2)
+    storage.get_recent_packets.assert_called_once_with(limit=2, include_raw=False)
     storage.get_filtered_packets.assert_called_once_with(
         packet_type=None,
         route=None,
@@ -1056,7 +1056,26 @@ def test_recent_packets_and_bulk_packets(cherrypy_ctx):
         end_timestamp=3.5,
         limit=10000,
         offset=0,
+        include_raw=False,
     )
+
+
+def test_recent_and_bulk_packets_include_raw_flag(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    storage = SimpleNamespace(
+        get_recent_packets=MagicMock(return_value=[]),
+        get_filtered_packets=MagicMock(return_value=[]),
+    )
+    _attach_storage(api, storage)
+
+    api.recent_packets("5", include_raw="1")
+    api.bulk_packets(limit="10", include_raw="true")
+    api.recent_packets("5", include_raw="0")
+
+    storage.get_recent_packets.assert_any_call(limit=5, include_raw=True)
+    storage.get_recent_packets.assert_any_call(limit=5, include_raw=False)
+    assert storage.get_filtered_packets.call_args.kwargs["include_raw"] is True
 
 
 def test_filtered_packets_options_and_success(cherrypy_ctx):
