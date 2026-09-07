@@ -32,6 +32,7 @@ logger = logging.getLogger("PluginManager")
 
 
 PROGRESS_MAX_LINES = 500
+PROGRESS_MAX_LOGS = 32  # plugins whose last operation is remembered; the oldest finished go first
 
 
 class OperationProgress:
@@ -160,6 +161,12 @@ class PluginManager:
         progress = OperationProgress(plugin_id, operation)
         with self._lock:
             self._progress[plugin_id] = progress
+            finished = sorted(
+                (p for p in self._progress.values() if p.state != "running" and p is not progress),
+                key=lambda p: p.finished or p.started,
+            )
+            for old in finished[: max(0, len(self._progress) - PROGRESS_MAX_LOGS)]:
+                del self._progress[old.plugin_id]
         previous = self.runtime.on_output
         self.runtime.on_output = progress.append
         try:

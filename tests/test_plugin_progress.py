@@ -15,11 +15,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import cherrypy
 import pytest
 
 from repeater.plugins.ipc import PluginIPCClient, PluginIPCServer
 from repeater.plugins.manager import (
     PROGRESS_MAX_LINES,
+    PROGRESS_MAX_LOGS,
     OperationProgress,
     PluginManager,
     PluginManagerError,
@@ -129,6 +131,31 @@ def test_the_listener_is_removed_after_the_operation(tmp_path: Path):
     assert mgr.runtime.on_output is None
 
 
+def test_the_manager_remembers_a_bounded_number_of_logs(tmp_path: Path):
+    mgr = PluginManager(PluginStorage(tmp_path / "plugins"))
+    for i in range(PROGRESS_MAX_LOGS + 10):
+        with pytest.raises(PluginManagerError):
+            mgr.update_plugin(f"nobody.{i:03d}")
+    assert len(mgr._progress) == PROGRESS_MAX_LOGS
+    # The newest are kept, the oldest finished let go.
+    assert mgr.progress("nobody.000")["state"] == "idle"
+    assert mgr.progress(f"nobody.{PROGRESS_MAX_LOGS + 9:03d}")["state"] == "error"
+
+
+def test_runtime_bounds_a_line_that_never_ends(tmp_path: Path):
+    from repeater.plugins.runtime import INSTALL_OUTPUT_MAX_BYTES
+
+    runtime = PluginRuntime(PluginStorage(tmp_path / "plugins"))
+    heard: list[str] = []
+    runtime.on_output = heard.append
+    script = (
+        f"import sys; sys.stdout.write('x' * {INSTALL_OUTPUT_MAX_BYTES * 3}); sys.stdout.flush()"
+    )
+    runtime._run_install_command([sys.executable, "-c", script], timeout=30)
+    assert len(heard) == 1
+    assert len(heard[0]) <= INSTALL_OUTPUT_MAX_BYTES
+
+
 # ── the IPC exposes it ───────────────────────────────────────────────────────
 
 
@@ -153,7 +180,9 @@ def test_ipc_round_trips_progress(tmp_path: Path):
 # ── the web layer streams it ─────────────────────────────────────────────────
 
 
-def _events(api: PluginAPIEndpoints, plugin_id: str, snapshots: list[dict], *, ticks=None):
+def _events(
+    api: PluginAPIEndpoints, plugin_id: str, snapshots: list[dict], *, ticks=None, fresh=False
+):
     """Drive the generator with a client that answers the snapshots in order."""
     answers = iter(snapshots)
 
@@ -168,7 +197,7 @@ def _events(api: PluginAPIEndpoints, plugin_id: str, snapshots: list[dict], *, t
     out: list[dict] = []
     with patch.object(api, "_client_or_raise", return_value=client):
         for chunk in api._progress_events(
-            plugin_id, 0, sleep=lambda _s: None, clock=lambda: next(clock)
+            plugin_id, 0, fresh=fresh, sleep=lambda _s: None, clock=lambda: next(clock)
         ):
             assert chunk.startswith("data: ") and chunk.endswith("\n\n")
             out.append(json.loads(chunk[len("data: ") : -2]))
@@ -207,8 +236,13 @@ def test_stream_plays_lines_status_and_one_done(tmp_path: Path):
         "Collecting demo",
         "Successfully installed demo-0.2.0",
     ]
-    assert events[2] == {"type": "status", "state": "running", "operation": "update"}
-    assert events[-1] == {"type": "done", "state": "complete", "error": None}
+    assert events[2] == {
+        "type": "status",
+        "state": "running",
+        "operation": "update",
+        "started": None,
+    }
+    assert events[-1] == {"type": "done", "state": "complete", "error": None, "started": None}
 
 
 def test_stream_reports_a_failed_operation_and_ends(tmp_path: Path):
@@ -221,21 +255,102 @@ def test_stream_reports_a_failed_operation_and_ends(tmp_path: Path):
         "error": "update install failed: pip",
     }
     events = _events(api, "openhop.demo", [failed])
-    assert events[-1] == {"type": "done", "state": "error", "error": "update install failed: pip"}
+    assert events[-1] == {
+        "type": "done",
+        "state": "error",
+        "error": "update install failed: pip",
+        "started": None,
+    }
     assert events[-2]["type"] == "status"
 
 
-def test_stream_keeps_alive_while_idle_then_times_out(tmp_path: Path):
+def test_stream_keeps_alive_while_idle_then_lets_the_thread_go(tmp_path: Path):
     api = PluginAPIEndpoints({"storage": {"storage_dir": str(tmp_path)}})
-    idle = {"state": "idle", "operation": None, "lines": [], "next": 0, "error": None}
-    # The clock is read once for the deadline, then once per poll: twelve quiet polls (a keepalive every
-    # fourth, after the first poll's status event) and then a reading past the budget.
-    ticks = [0.0] + [1.0] * 12 + [10_000.0]
+    idle = {
+        "state": "idle",
+        "operation": None,
+        "lines": [],
+        "next": 0,
+        "error": None,
+        "started": None,
+    }
+    # The clock is read once at open, then once per poll: twelve quiet polls (a keepalive every
+    # fourth, after the first poll's status event) and then a reading past the idle budget.
+    ticks = [0.0] + [1.0] * 12 + [100.0]
     events = _events(api, "openhop.demo", [idle], ticks=ticks)
     types = [e["type"] for e in events]
     assert types[0:2] == ["connected", "status"]
     assert types.count("keepalive") == 2
+    assert events[-1] == {"type": "done", "state": "idle", "error": None}
+
+
+def test_stream_follows_a_running_operation_to_the_completion_budget(tmp_path: Path):
+    api = PluginAPIEndpoints({"storage": {"storage_dir": str(tmp_path)}})
+    running = {
+        "state": "running",
+        "operation": "update",
+        "lines": [],
+        "next": 0,
+        "error": None,
+        "started": 5.0,
+    }
+    # Well past the idle budget but inside the completion budget the stream stays; past it, it ends.
+    ticks = [0.0, 100.0, 500.0, 899.0, 901.0]
+    events = _events(api, "openhop.demo", [running], ticks=ticks)
     assert events[-1] == {"type": "done", "state": "timeout", "error": "progress stream timed out"}
+    assert len([e for e in events if e["type"] == "done"]) == 1
+
+
+def test_fresh_stream_waits_past_a_previous_operations_ending(tmp_path: Path):
+    """The race the console would hit: the stream opens before its own POST reaches the manager."""
+    api = PluginAPIEndpoints({"storage": {"storage_dir": str(tmp_path)}})
+    previous = {
+        "state": "complete",
+        "operation": "update",
+        "lines": ["old line"],
+        "next": 1,
+        "error": None,
+        "started": 100.0,
+    }
+    current = {
+        "state": "running",
+        "operation": "update",
+        "lines": ["Downloading demo 0.3.0"],
+        "next": 1,
+        "error": None,
+        "started": 200.0,
+    }
+    finished = {
+        "state": "complete",
+        "operation": "update",
+        "lines": [],
+        "next": 1,
+        "error": None,
+        "started": 200.0,
+    }
+    events = _events(api, "openhop.demo", [previous, previous, current, finished], fresh=True)
+    types = [e["type"] for e in events]
+    assert types == ["connected", "status", "line", "status", "status", "done"]
+    assert events[1]["state"] == "idle"
+    assert "old line" not in [e.get("line") for e in events]
+    assert events[2]["line"] == "Downloading demo 0.3.0"
+    assert events[-1]["started"] == 200.0
+
+    # Without the flag the same first answer is taken at its word, as a late reader wants.
+    events = _events(api, "openhop.demo", [previous])
+    assert [e["type"] for e in events] == ["connected", "line", "status", "done"]
+
+
+def test_head_does_not_run_the_stream(tmp_path: Path):
+    api = PluginAPIEndpoints({"storage": {"storage_dir": str(tmp_path)}})
+    cherrypy.request.method = "HEAD"
+    cherrypy.response = SimpleNamespace(status=200, headers={})
+    polls = []
+    with patch.object(api, "_client_or_raise", side_effect=lambda: polls.append(1)):
+        assert api.progress(id="openhop.demo") == ""
+    assert polls == []
+    assert cherrypy.response.headers["Content-Type"] == "text/event-stream"
+    cherrypy.request.method = "GET"
 
 
 def test_stream_ends_when_the_manager_is_unavailable(tmp_path: Path):

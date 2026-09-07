@@ -277,6 +277,7 @@ class PluginRuntime:
                         pending.extend(chunk)
                         *lines, rest = pending.split(b"\n")
                         pending[:] = rest
+                        del pending[:-INSTALL_OUTPUT_MAX_BYTES]
                         for line in lines:
                             emit(line)
             if pending:

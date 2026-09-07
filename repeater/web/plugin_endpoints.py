@@ -27,6 +27,7 @@ logger = logging.getLogger("HTTPServer")
 PROGRESS_POLL_SECONDS = 0.75
 PROGRESS_KEEPALIVE_EVERY = 4  # polls between keepalives when nothing changed
 PROGRESS_MAX_SECONDS = 900.0  # matches the IPC completion budget
+PROGRESS_IDLE_SECONDS = 60.0  # a stream with nothing to watch does not hold a thread for long
 
 
 class PluginAPIEndpoints:
@@ -314,13 +315,17 @@ class PluginAPIEndpoints:
 
     @cherrypy.expose
     def progress(self, **kwargs):
-        """GET /api/plugins/progress?id=&since= — server-sent events of an install or update.
+        """GET /api/plugins/progress?id=&since=&fresh= — server-sent events of an install or update.
 
         Mirrors /api/update/progress: ``line`` events carry the installer's
         output as it arrives, ``status`` events the operation's state, and one
         ``done`` event ends the stream when the operation completes or fails.
         A stream opened with nothing running reports ``idle`` and waits for an
-        operation to begin, within the IPC completion budget.
+        operation to begin, for a minute at most; a running operation is
+        followed to the IPC completion budget. ``fresh=1`` is for a client
+        that opens the stream as it starts an operation: a log already
+        finished when the stream opens is treated as idle, so the client is
+        never told a previous operation's ending is this one's.
         """
         if cherrypy.request.method == "OPTIONS":
             return ""
@@ -331,17 +336,27 @@ class PluginAPIEndpoints:
             since = int(kwargs.get("since", 0))
         except (TypeError, ValueError):
             raise cherrypy.HTTPError(400, "since must be an integer")
+        fresh = str(kwargs.get("fresh", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if cherrypy.request.method == "HEAD":
+            cherrypy.response.headers["Content-Type"] = "text/event-stream"
+            return ""
 
         cherrypy.response.headers["Content-Type"] = "text/event-stream"
         cherrypy.response.headers["Cache-Control"] = "no-cache"
         cherrypy.response.headers["X-Accel-Buffering"] = "no"
         cherrypy.response.headers["Connection"] = "keep-alive"
-        return self._progress_events(plugin_id, since)
+        return self._progress_events(plugin_id, since, fresh=fresh)
 
     progress._cp_config = {"response.stream": True}
 
     def _progress_events(
-        self, plugin_id: str, since: int, *, sleep=time.sleep, clock=time.monotonic
+        self,
+        plugin_id: str,
+        since: int,
+        *,
+        fresh: bool = False,
+        sleep=time.sleep,
+        clock=time.monotonic,
     ):
         """The generator behind /api/plugins/progress, with its clocks injectable."""
 
@@ -353,7 +368,12 @@ class PluginAPIEndpoints:
             cursor = since
             last_state = None
             quiet = 0
-            deadline = clock() + PROGRESS_MAX_SECONDS
+            # The log a fresh watcher must not mistake for its own operation.
+            stale_started = None
+            watched_started = None
+            opened = clock()
+            deadline = opened + PROGRESS_MAX_SECONDS
+            idle_deadline = opened + PROGRESS_IDLE_SECONDS
             while True:
                 try:
                     snap = self._client_or_raise().progress(plugin_id, since=cursor)
@@ -367,25 +387,57 @@ class PluginAPIEndpoints:
                     yield event({"type": "done", "state": "error", "error": str(exc)})
                     return
 
+                state = snap.get("state")
+                started = snap.get("started")
+                if fresh and last_state is None and state in ("complete", "error"):
+                    stale_started = started
+                if stale_started is not None and started == stale_started:
+                    # Still the previous operation's log: nothing to report yet.
+                    state = "idle"
+                    snap = {**snap, "lines": [], "next": cursor, "operation": None, "started": None}
+                elif watched_started is not None and started != watched_started:
+                    # A new operation began under the same id: its log starts over.
+                    cursor = 0
+                    snap = self._client_or_raise().progress(plugin_id, since=0)
+                    state = snap.get("state")
+                    started = snap.get("started")
+                if state == "running":
+                    watched_started = started
+
                 changed = False
                 for line in snap.get("lines") or []:
                     yield event({"type": "line", "line": line})
                     changed = True
                 cursor = int(snap.get("next") or cursor)
-                state = snap.get("state")
                 if state != last_state:
                     yield event(
-                        {"type": "status", "state": state, "operation": snap.get("operation")}
+                        {
+                            "type": "status",
+                            "state": state,
+                            "operation": snap.get("operation"),
+                            "started": snap.get("started"),
+                        }
                     )
                     last_state = state
                     changed = True
                 if state in ("complete", "error"):
-                    yield event({"type": "done", "state": state, "error": snap.get("error")})
+                    yield event(
+                        {
+                            "type": "done",
+                            "state": state,
+                            "error": snap.get("error"),
+                            "started": snap.get("started"),
+                        }
+                    )
                     return
-                if clock() >= deadline:
+                now = clock()
+                if now >= deadline:
                     yield event(
                         {"type": "done", "state": "timeout", "error": "progress stream timed out"}
                     )
+                    return
+                if state == "idle" and now >= idle_deadline:
+                    yield event({"type": "done", "state": "idle", "error": None})
                     return
                 quiet = 0 if changed else quiet + 1
                 if quiet and quiet % PROGRESS_KEEPALIVE_EVERY == 0:

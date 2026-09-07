@@ -4712,7 +4712,10 @@ paths:
         arrives; `status` with the operation's state (idle, running, complete,
         error); `keepalive`; and one `done` with the final state and any error,
         which ends the stream. Opened with nothing running, the stream reports
-        idle and waits for an operation to begin.
+        idle and waits up to a minute for an operation to begin; a running
+        operation is followed to the IPC completion budget. Only catalogue
+        installs and updates are reported; a wheel uploaded to /plugins/install
+        is not.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -4729,6 +4732,15 @@ paths:
           schema:
             type: integer
             default: 0
+        - name: fresh
+          in: query
+          required: false
+          description: >-
+            Treat a log already finished when the stream opens as idle, and wait for
+            the next operation. For a client that opens the stream as it starts one.
+          schema:
+            type: boolean
+            default: false
       responses:
         '504':
           $ref: '#/components/responses/PluginOutcomeUnknown'
