@@ -31,6 +31,73 @@ from .storage import PluginStorage
 logger = logging.getLogger("PluginManager")
 
 
+PROGRESS_MAX_LINES = 500
+
+
+class OperationProgress:
+    """What an install or update has said so far, for a client watching it.
+
+    One per plugin, replaced when a new operation begins and kept after it
+    ends so a watcher that connects late still reads the whole story. Bounded
+    like the runtime's own output buffer.
+    """
+
+    def __init__(self, plugin_id: str, operation: str):
+        self.plugin_id = plugin_id
+        self.operation = operation
+        self.state = "running"
+        self.error: Optional[str] = None
+        self.started = time.time()
+        self.finished: Optional[float] = None
+        self._lines: list[str] = []
+        # Lines the bound has dropped: a watcher's cursor counts every line ever
+        # appended, so trimming never makes it point at the wrong line.
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def append(self, line: str) -> None:
+        with self._lock:
+            self._lines.append(line)
+            excess = len(self._lines) - PROGRESS_MAX_LINES
+            if excess > 0:
+                del self._lines[:excess]
+                self._dropped += excess
+
+    def finish(self, error: Optional[str] = None) -> None:
+        with self._lock:
+            self.state = "error" if error else "complete"
+            self.error = error
+            self.finished = time.time()
+
+    def snapshot(self, since: int = 0) -> dict[str, Any]:
+        with self._lock:
+            start = max(0, min(int(since) - self._dropped, len(self._lines)))
+            return {
+                "id": self.plugin_id,
+                "operation": self.operation,
+                "state": self.state,
+                "error": self.error,
+                "lines": list(self._lines[start:]),
+                "next": self._dropped + len(self._lines),
+                "started": self.started,
+                "finished": self.finished,
+            }
+
+
+def _reported(operation: str):
+    """Record the operation's output and outcome in the plugin's progress log."""
+
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(self, plugin_id, *args, **kwargs):
+            with self._report(plugin_id, operation):
+                return fn(self, plugin_id, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
 def _serialized_plugin(fn):
     """Keep a complete lifecycle transaction exclusive, without queuing callers."""
 
@@ -66,6 +133,7 @@ class PluginManager:
         self.runtime = runtime or PluginRuntime(storage)
         self._lock = threading.RLock()
         self._operations: dict[str, tuple[int, int]] = {}
+        self._progress: dict[str, OperationProgress] = {}
         self.catalogue = catalogue_client or CatalogueClient(catalogue_url or DEFAULT_CATALOGUE_URL)
         self.github = github_client or GitHubReleaseClient()
 
@@ -86,6 +154,50 @@ class PluginManager:
                     del self._operations[plugin_id]
                 else:
                     self._operations[plugin_id] = (owner, depth - 1)
+
+    @contextmanager
+    def _report(self, plugin_id: str, operation: str):
+        progress = OperationProgress(plugin_id, operation)
+        with self._lock:
+            self._progress[plugin_id] = progress
+        previous = self.runtime.on_output
+        self.runtime.on_output = progress.append
+        try:
+            yield progress
+        except PluginManagerError as exc:
+            progress.finish(str(exc))
+            raise
+        except Exception as exc:
+            progress.finish(str(exc))
+            raise
+        else:
+            progress.finish()
+        finally:
+            self.runtime.on_output = previous
+
+    def _note(self, plugin_id: str, line: str) -> None:
+        """A line of the manager's own into the plugin's running progress log."""
+        with self._lock:
+            progress = self._progress.get(plugin_id)
+        if progress is not None and progress.state == "running":
+            progress.append(line)
+
+    def progress(self, plugin_id: str, since: int = 0) -> dict[str, Any]:
+        """The last install or update's progress, from line ``since`` on."""
+        with self._lock:
+            progress = self._progress.get(plugin_id)
+        if progress is None:
+            return {
+                "id": plugin_id,
+                "operation": None,
+                "state": "idle",
+                "error": None,
+                "lines": [],
+                "next": 0,
+                "started": None,
+                "finished": None,
+            }
+        return progress.snapshot(since)
 
     @contextmanager
     def stage_upload(self, wheel_path: str):
@@ -430,6 +542,7 @@ class PluginManager:
         return {"schema": catalogue.schema, "plugins": plugins_out}
 
     @_serialized_plugin
+    @_reported("install")
     def install_from_catalogue(
         self,
         plugin_id: str,
@@ -454,10 +567,14 @@ class PluginManager:
                         400,
                     )
                 try:
+                    self._note(
+                        plugin_id, f"Downloading {plugin_id} {entry.version} from the catalogue"
+                    )
                     wheel_path = self.catalogue.download_wheel(entry, staging)
                 except CatalogueError as exc:
                     raise PluginManagerError(str(exc), int(exc.code)) from exc
             else:
+                self._note(plugin_id, f"Downloading {plugin_id} from {entry.repository}")
                 try:
                     _release, wheel_path = self.github.download_latest_wheel(
                         entry.repository,
@@ -568,6 +685,7 @@ class PluginManager:
         }
 
     @_serialized_plugin
+    @_reported("update")
     def update_plugin(
         self,
         plugin_id: str,
@@ -642,6 +760,10 @@ class PluginManager:
         staging = make_download_temp_dir(download_root)
         try:
             if approved_entry is not None:
+                self._note(
+                    plugin_id,
+                    f"Downloading {plugin_id} {approved_entry.version} from the catalogue",
+                )
                 try:
                     wheel_path = self.catalogue.download_wheel(approved_entry, staging)
                 except CatalogueError as exc:
@@ -650,6 +772,9 @@ class PluginManager:
             else:
                 if release is None:
                     raise PluginManagerError("could not resolve plugin release", 500)
+                self._note(
+                    plugin_id, f"Downloading {plugin_id} {release.version} from {repository}"
+                )
                 try:
                     wheel_path = self.github.download_wheel(release, staging)
                 except GitHubReleasesError as exc:

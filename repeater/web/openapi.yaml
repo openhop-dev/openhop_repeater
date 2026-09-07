@@ -4701,6 +4701,45 @@ paths:
           description: Updated plugin status
         '400':
           description: Update unavailable or invalid
+  /plugins/progress:
+    get:
+      tags: [Plugins]
+      summary: Stream an install or update's progress
+      description: |
+        Server-sent events for the last install or update of one plugin, the
+        way /update/progress streams the repeater's own updater. Each event is
+        a JSON object: `connected`; `line` with the installer's output as it
+        arrives; `status` with the operation's state (idle, running, complete,
+        error); `keepalive`; and one `done` with the final state and any error,
+        which ends the stream. Opened with nothing running, the stream reports
+        idle and waits for an operation to begin.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Resume from this line index (the last event's `next`)
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '504':
+          $ref: '#/components/responses/PluginOutcomeUnknown'
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '503':
+          description: Plugin manager unavailable
   /plugins/settings:
     get:
       tags: [Plugins]

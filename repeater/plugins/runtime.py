@@ -72,6 +72,8 @@ class PluginRuntime:
         self.crash_max_exits = crash_max_exits
         self._popen = popen_factory or subprocess.Popen
         self._run = run_factory or self._run_install_command
+        # Whoever is watching an install: called with each complete output line as it arrives.
+        self.on_output: Optional[Callable[[str], None]] = None
         self._lock = threading.RLock()
         self._handles: dict[str, ProcessHandle] = {}
         self._runtime_state: dict[str, PluginState] = {}
@@ -232,6 +234,16 @@ class PluginRuntime:
             rebuild_marker.unlink()
             shutil.rmtree(backup)
 
+    def _announce(self, line: str) -> None:
+        """A line of the runtime's own, for whoever is watching an install."""
+        listener = self.on_output
+        if listener is None:
+            return
+        try:
+            listener(line)
+        except Exception:
+            logger.debug("install output listener failed", exc_info=True)
+
     def _run_install_command(self, cmd, *, timeout, **kwargs):
         """Drain output into bounded memory and kill the entire installer group."""
         # Callers construct Python/venv/pip argv; installing trusted wheels is intentional.
@@ -245,12 +257,30 @@ class PluginRuntime:
             "installer", proc, None, process_group=proc.pid if os.name == "posix" else None
         )
         output = bytearray()
+        listener = self.on_output
+        pending = bytearray()
+
+        def emit(line: bytes) -> None:
+            if listener is None:
+                return
+            try:
+                listener(line.decode("utf-8", errors="replace").rstrip("\r"))
+            except Exception:  # a listener must never break the install
+                logger.debug("install output listener failed", exc_info=True)
 
         def drain():
             with proc.stdout as source:
                 while chunk := source.read1(64 * 1024):
                     output.extend(chunk)
                     del output[:-INSTALL_OUTPUT_MAX_BYTES]
+                    if listener is not None:
+                        pending.extend(chunk)
+                        *lines, rest = pending.split(b"\n")
+                        pending[:] = rest
+                        for line in lines:
+                            emit(line)
+            if pending:
+                emit(bytes(pending))
 
         reader = threading.Thread(target=drain, name="plugin-install-output", daemon=True)
         reader.start()
@@ -271,6 +301,7 @@ class PluginRuntime:
             if py.is_file():
                 return
         venv_path.parent.mkdir(parents=True, exist_ok=True)
+        self._announce(f"Creating environment: {venv_path.name}")
         result = self._run(
             [self.python_executable, "-m", "venv", str(venv_path)],
             timeout=VENV_TIMEOUT_SECONDS,
@@ -288,6 +319,7 @@ class PluginRuntime:
         if not py.is_file():
             raise RuntimeError(f"venv python missing: {py}")
         install_path = self._ensure_pip_wheel_filename(wheel_path)
+        self._announce(f"Installing {wheel_path.name} with pip")
         try:
             result = self._run(
                 [str(py), "-m", "pip", "install", "--upgrade", str(install_path)],
