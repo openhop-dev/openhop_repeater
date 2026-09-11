@@ -4268,12 +4268,12 @@ class SQLiteHandler:
             logger.error(f"Failed to push companion message: {e}")
             return False
 
-    def companion_pop_message(self, companion_hash: str) -> Optional[Dict]:
-        """Remove and return the oldest message from the companion's queue."""
+    def companion_peek_message(self, companion_hash: str) -> Optional[Dict]:
+        """Return the oldest queued message, with its ``id``, without removing it."""
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute(
+                row = conn.execute(
                     """
                     SELECT id, sender_key, txt_type, timestamp, text, is_channel, channel_idx,
                            path_len, sender_prefix, snr, rssi, channel_data_type,
@@ -4282,8 +4282,7 @@ class SQLiteHandler:
                     ORDER BY id ASC LIMIT 1
                 """,
                     (companion_hash,),
-                )
-                row = cursor.fetchone()
+                ).fetchone()
                 if not row:
                     return None
                 msg = dict(row)
@@ -4292,9 +4291,29 @@ class SQLiteHandler:
                 msg["rssi"] = int(msg.get("rssi") or 0)
                 msg["channel_data_type"] = int(msg.get("channel_data_type") or 0)
                 msg["channel_data_payload"] = bytes(msg.get("channel_data_payload") or b"")
-                conn.execute("DELETE FROM companion_messages WHERE id = ?", (msg["id"],))
-                conn.commit()
-                return {k: v for k, v in msg.items() if k != "id"}
+                return msg
         except Exception as e:
-            logger.error(f"Failed to pop companion message: {e}")
+            logger.error(f"Failed to peek companion message: {e}")
             return None
+
+    def companion_delete_message(self, companion_hash: str, message_id: int) -> bool:
+        """Remove one queued message once the client has demonstrably received it."""
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM companion_messages WHERE id = ? AND companion_hash = ?",
+                    (message_id, companion_hash),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete companion message: {e}")
+            return False
+
+    def companion_pop_message(self, companion_hash: str) -> Optional[Dict]:
+        """Remove and return the oldest message from the companion's queue."""
+        msg = self.companion_peek_message(companion_hash)
+        if not msg:
+            return None
+        self.companion_delete_message(companion_hash, msg.pop("id"))
+        return msg
