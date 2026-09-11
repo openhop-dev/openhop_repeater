@@ -589,6 +589,8 @@ def get_radio_for_board(board_config: dict):
             combined_config["use_gpiod_backend"] = spi_config["use_gpiod_backend"]
         if "radio_timing_delay" in spi_config:
             combined_config["radio_timing_delay"] = float(spi_config["radio_timing_delay"])
+        if "lna_gain_db" in spi_config:
+            combined_config["lna_gain_db"] = float(spi_config["lna_gain_db"])
 
         # Always construct a fresh instance so multi-radio configs do not
         # share/reuse a singleton SX1262 handle.
