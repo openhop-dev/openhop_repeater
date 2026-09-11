@@ -66,6 +66,17 @@
                     "coding_rate": "8"
                 },
                 {
+                    "title": "Canada",
+                    "description": "910.525MHz / SF7 / BW62.5 / CR5 / 3B",
+                    "frequency": "910.525",
+                    "spreading_factor": "7",
+                    "bandwidth": "62.5",
+                    "coding_rate": "5",
+                    "network_settings": {
+                        "path_hash_size": 3
+                    }
+                },
+                {
                     "title": "Costa Rica",
                     "description": "910.525MHz / SF11 / BW125 / CR5",
                     "frequency": "910.525",
@@ -133,6 +144,17 @@
                     "coding_rate": "5"
                 },
                 {
+                    "title": "Netherlands (Limburg)",
+                    "description": "869.618MHz / SF8 / BW62.5 / CR8 / 2B",
+                    "frequency": "869.618",
+                    "spreading_factor": "8",
+                    "bandwidth": "62.5",
+                    "coding_rate": "8",
+                    "network_settings": {
+                        "path_hash_size": 2
+                    }
+                },
+                {
                     "title": "New Zealand (Narrow)",
                     "description": "917.375MHz / SF7 / BW62.5 / CR5 / 2B",
                     "frequency": "917.375",
@@ -190,12 +212,34 @@
                     "coding_rate": "8"
                 },
                 {
-                    "title": "USA/Canada (Recommended)",
+                    "title": "USA",
                     "description": "910.525MHz / SF7 / BW62.5 / CR5",
                     "frequency": "910.525",
                     "spreading_factor": "7",
                     "bandwidth": "62.5",
                     "coding_rate": "5"
+                },
+                {
+                    "title": "USA - Philadelphia (PhillyMesh)",
+                    "description": "902.250MHz / SF11 / BW500 / CR5 / 2B",
+                    "frequency": "902.250",
+                    "spreading_factor": "11",
+                    "bandwidth": "500",
+                    "coding_rate": "5",
+                    "network_settings": {
+                        "path_hash_size": 2
+                    }
+                },
+                {
+                    "title": "USA - Southern California",
+                    "description": "927.875MHz / SF7 / BW62.5 / CR5 / 3B",
+                    "frequency": "927.875",
+                    "spreading_factor": "7",
+                    "bandwidth": "62.5",
+                    "coding_rate": "5",
+                    "network_settings": {
+                        "path_hash_size": 3
+                    }
                 },
                 {
                     "title": "Vietnam (Narrow)",
