@@ -255,6 +255,12 @@ class StorageCollector:
         Only fast, per-packet work runs here. The aggregate stats broadcast is
         driven separately by _stats_broadcast_loop so the writer thread is not
         held by the multi-second get_packet_stats(24h) query.
+
+        ``skip_mqtt`` withholds a packet the caller judged invalid (a malformed
+        advert, an empty payload, an over-long path) from the brokers only. It
+        is still stored and still reaches Glass and the dashboard, which are
+        the surfaces an operator debugs their own RF from; what it must not do
+        is feed a network-wide observer a packet this node could not parse.
         """
         self._publish_to_glass(packet_record, "packet")
 
@@ -263,6 +269,13 @@ class StorageCollector:
                 self.websocket_broadcast_packet(packet_record)
             except Exception as e:
                 logger.debug(f"WebSocket broadcast failed: {e}")
+
+        if skip_mqtt and packet_record.get("drop_reason"):
+            logger.debug(
+                "Skipping mqtt publish for invalid packet: %s",
+                packet_record.get("drop_reason"),
+            )
+            return
 
         self._publish_packet_to_mqtt(packet_record)
 
