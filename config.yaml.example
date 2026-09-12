@@ -723,6 +723,18 @@ mqtt_brokers:
   #   enabled: true|false # Enable TLS. If the endpoint's certificate is self-signed, the Root CA should be added to the OS's certificate store. 
   #   insecure: true|false # Validate TLS certificates
 
+  # Multi-radio nodes (see `radios:` above) additionally publish:
+  #   - `rx_radio_id` and `tx_radio_ids` on each packet: the radio that heard
+  #     it, and every radio that retransmitted it (a bridge repeating on both
+  #     sides lists both). `tx_radio_ids` is always a list; it is absent when
+  #     the packet was not repeated.
+  #   - `radios` in the status message: `[{id, radio}]` mapping each radio id
+  #     to its `MHz,kHz,SF,CR` settings, so a consumer can resolve those ids to
+  #     frequencies. Ids are unique only within a node - key on
+  #     (origin_id, id). The top-level `radio` field then reports the default
+  #     radio.
+  # Single-radio nodes publish neither, exactly as before.
+
   # Block specific packet types from being published to the MQTT endpoint
   # If not specified or empty list, all types are published
   # Available types: REQ, RESPONSE, TXT_MSG, ACK, ADVERT, GRP_TXT,

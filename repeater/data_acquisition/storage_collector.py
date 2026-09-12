@@ -38,6 +38,11 @@ class StorageCollector:
             max_workers=1, thread_name_prefix="storage-writer"
         )
 
+        # Radio count is fixed at boot (build_radio_stack opens the hardware),
+        # so this is resolved once rather than per packet. Air settings can
+        # still change at runtime; those are re-read when status is published.
+        self._multi_radio = len(build_radio_profiles(config)) > 1
+
         self.storage_dir = resolve_storage_dir(config)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
@@ -328,6 +333,10 @@ class StorageCollector:
         ``packet_record['airtime_ms']``, populated upstream by
         RepeaterHandler._build_packet_record using the Semtech reference
         time-on-air formula. No recomputation is needed here.
+
+        On a multi-radio node the payload also carries the ingress radio and
+        every successful egress, which an observer resolves to frequencies
+        through the ``radios`` map in this node's status message.
         """
         if not self.mqtt_handler:
             return
@@ -340,7 +349,10 @@ class StorageCollector:
 
             node_name = self.config.get("repeater", {}).get("node_name", "Unknown")
             packet = PacketRecord.from_packet_record(
-                packet_record, origin=node_name, origin_id=self.mqtt_handler.public_key
+                packet_record,
+                origin=node_name,
+                origin_id=self.mqtt_handler.public_key,
+                include_radio_ids=self._multi_radio,
             )
 
             if packet:

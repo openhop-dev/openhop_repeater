@@ -160,6 +160,11 @@ def resolve_storage_dir(
     return storage_dir
 
 
+def format_radio_config_str(frequency_hz, bandwidth_hz, spreading_factor, coding_rate) -> str:
+    """Air settings as the MC2MQTT status ``radio`` string: MHz,kHz,SF,CR."""
+    return f"{frequency_hz / 1_000_000},{bandwidth_hz / 1_000},{spreading_factor},{coding_rate}"
+
+
 def get_node_info(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract node name, radio configuration, and MQTT settings from config.
@@ -172,14 +177,12 @@ def get_node_info(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     node_name = config.get("repeater", {}).get("node_name", "PyMC-Repeater")
     radio_config = config.get("radio", {})
-    radio_freq = radio_config.get("frequency", 0.0)
-    radio_bw = radio_config.get("bandwidth", 0.0)
-    radio_sf = radio_config.get("spreading_factor", 7)
-    radio_cr = radio_config.get("coding_rate", 5)
-    # Format frequency in MHz and bandwidth in kHz
-    radio_freq_mhz = radio_freq / 1_000_000
-    radio_bw_khz = radio_bw / 1_000
-    radio_config_str = f"{radio_freq_mhz},{radio_bw_khz},{radio_sf},{radio_cr}"
+    radio_config_str = format_radio_config_str(
+        radio_config.get("frequency", 0.0),
+        radio_config.get("bandwidth", 0.0),
+        radio_config.get("spreading_factor", 7),
+        radio_config.get("coding_rate", 5),
+    )
 
     # Handle getting the config from mqtt brokers, falling back to letsmesh if it doesn't exist
     mqtt_config = config.get("mqtt_brokers", config.get("letsmesh", {}))
@@ -1042,6 +1045,38 @@ def build_radio_profiles(config: dict) -> list:
     rid = str(default_radio) if (default_radio and fabric_cfg.get("use_fabric")) else "radio0"
     profile = _radio_air_profile(normalized, rid)
     return [profile] if profile is not None else []
+
+
+def build_radio_status_entries(config: dict) -> list:
+    """Map every radio id to its air settings, for the MQTT status message.
+
+    Observers join this against the ``rx_radio_id`` / ``tx_radio_ids`` fields
+    published on each packet. The ids are operator-chosen and unique only
+    within a node, so a consumer keys on ``(origin_id, id)``. The ``radio``
+    value repeats the ``MHz,kHz,SF,CR`` shape of the top-level status field so
+    no second parser is needed.
+
+    Returns an empty list when any radio's settings are unreadable: a partial
+    map would silently attribute a packet to the wrong band, which is worse
+    than an observer knowing the map is unavailable.
+    """
+    profiles = build_radio_profiles(config)
+    entries = []
+    for profile in profiles:
+        fields = (
+            profile.get("frequency_hz"),
+            profile.get("bandwidth_hz"),
+            profile.get("spreading_factor"),
+            profile.get("coding_rate"),
+        )
+        if any(value is None for value in fields):
+            logger.warning(
+                "Radio %s has unreadable air settings; omitting the status radio map",
+                profile.get("radio_id"),
+            )
+            return []
+        entries.append({"id": profile["radio_id"], "radio": format_radio_config_str(*fields)})
+    return entries
 
 
 def build_radio_stack(config: dict):

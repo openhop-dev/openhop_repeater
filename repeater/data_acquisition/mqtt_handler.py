@@ -988,10 +988,56 @@ class MeshCoreToMqttPusher:
             "stats": {**live_stats, "errors": 0, "queue_len": 0, **(extra_stats or {})},
         }
 
+        radios = self._radio_map()
+        if radios:
+            status["radios"] = radios
+            # On a Fabric node the top-level ``radio:`` block is the base that
+            # entries inherit from, so it can describe a band no radio is
+            # actually on. Report the default radio instead, which is the one
+            # an observer that ignores ``radios`` should assume.
+            status["radio"] = self._default_radio_str(radios) or status["radio"]
+
         if location:
             status["location"] = location
 
         return self.publish("status", status, retain=True, qos=1)
+
+    def _default_radio_str(self, entries: list) -> Optional[str]:
+        """Air settings of the radio Fabric transmits on by default.
+
+        Mirrors build_radio_stack's rule: ``fabric.default_radio`` when set,
+        otherwise the first configured radio.
+        """
+        fabric = self.config.get("fabric")
+        fabric = fabric if isinstance(fabric, dict) else {}
+        default_id = fabric.get("default_radio") or fabric.get("default_radio_id")
+        if default_id:
+            for entry in entries:
+                if entry["id"] == str(default_id):
+                    return entry["radio"]
+        return entries[0]["radio"] if entries else None
+
+    def _radio_map(self) -> list:
+        """Per-radio air settings for multi-radio nodes, else an empty list.
+
+        This is what makes the ``rx_radio_id`` / ``tx_radio_ids`` on published
+        packets mean something: on its own a radio id is an operator-chosen
+        label, and only this map says which frequency it was. A node runs one
+        radio in the overwhelming majority of deployments, where the existing
+        ``radio`` field already says everything, so the map is published only
+        when there is genuinely more than one band to tell apart.
+
+        Rebuilt per status publish rather than cached at construction, because
+        air settings can be changed from the web UI while the node runs.
+        """
+        from ..config import build_radio_status_entries
+
+        try:
+            entries = build_radio_status_entries(self.config)
+        except Exception as exc:  # pragma: no cover - reporting must not break status
+            logger.debug(f"Could not build radio map for status: {exc}")
+            return []
+        return entries if len(entries) > 1 else []
 
     def publish(self, subtopic: str, payload: dict, retain: bool = False, qos: int = 0):
         """Publish message to all connected brokers"""
