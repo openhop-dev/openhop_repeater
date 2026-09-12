@@ -650,7 +650,7 @@ class RepeaterHandler(BaseHandler):
                     DropReason.PATH_TOO_LONG,
                 )
                 skip_mqtt = drop_reason in invalid_reasons if drop_reason else False
-                self.storage.record_packet(packet_record, skip_mqtt_if_invalid=skip_mqtt)
+                self.storage.record_packet(packet_record, skip_mqtt=skip_mqtt)
             except Exception as e:
                 logger.error(f"Failed to store packet record: {e}")
 
@@ -740,7 +740,7 @@ class RepeaterHandler(BaseHandler):
             packet_hash=packet.calculate_packet_hash().hex().upper(),
         )
         try:
-            self.storage.record_packet(packet_record, skip_mqtt_if_invalid=False)
+            self.storage.record_packet(packet_record, skip_mqtt=False)
         except Exception as e:
             logger.error(f"Failed to store packet record (record_packet_only): {e}")
             return
@@ -893,7 +893,7 @@ class RepeaterHandler(BaseHandler):
 
         if self.storage:
             try:
-                self.storage.record_packet(packet_record, skip_mqtt_if_invalid=False)
+                self.storage.record_packet(packet_record, skip_mqtt=False)
             except Exception as e:
                 logger.error(f"Failed to store duplicate record: {e}")
 

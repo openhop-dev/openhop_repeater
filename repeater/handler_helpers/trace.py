@@ -238,6 +238,15 @@ class TraceHelper:
                 else 0.0
             ),
             "tx_delay_ms": 0,
+            # TRACE builds its own record instead of going through
+            # _build_packet_record, so the ingress radio has to be read off the
+            # packet here or a multi-radio node publishes an unattributed trace.
+            # There is no egress counterpart: a forwarded trace is injected into
+            # the router later and only mutates this record in memory, so the
+            # record that reaches the brokers is always the reception.
+            "rx_radio_id": (
+                getattr(packet, "_rx_radio_id", None) or getattr(packet, "rx_radio_id", None)
+            ),
             "transmitted": False,
             "is_duplicate": False,
             "packet_hash": packet.calculate_packet_hash().hex().upper()[:16],

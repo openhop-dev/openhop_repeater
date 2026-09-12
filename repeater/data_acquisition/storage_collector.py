@@ -201,7 +201,7 @@ class StorageCollector:
 
         return stats
 
-    def record_packet(self, packet_record: dict, skip_mqtt_if_invalid: bool = True):
+    def record_packet(self, packet_record: dict, skip_mqtt: bool = False):
         """Record a packet to storage and publish it.
 
         All blocking work — the SQLite write, the cumulative-counts aggregate, the
@@ -211,13 +211,16 @@ class StorageCollector:
 
         Args:
             packet_record: Dictionary containing packet information
-            skip_mqtt_if_invalid: If True, don't publish packets with drop_reason to mqtt
+            skip_mqtt: The caller determined this packet is invalid (it could not
+                be parsed); withhold it from the brokers. Classifying a packet is
+                the caller's job — a drop_reason alone does not mean invalid, as
+                duplicates, policy drops and traces all carry one.
         """
         logger.debug(
             f"Recording packet: type={packet_record.get('type')}, "
             f"transmitted={packet_record.get('transmitted')}"
         )
-        self._submit_db(self._record_packet_blocking, packet_record, skip_mqtt_if_invalid)
+        self._submit_db(self._record_packet_blocking, packet_record, skip_mqtt)
 
     def _submit_db(self, fn, *args):
         """Run a blocking storage operation on the dedicated writer thread.
@@ -261,6 +264,10 @@ class StorageCollector:
         is still stored and still reaches Glass and the dashboard, which are
         the surfaces an operator debugs their own RF from; what it must not do
         is feed a network-wide observer a packet this node could not parse.
+
+        The caller's judgement is taken as final here. Re-deriving it from
+        ``drop_reason`` would silence traces, duplicates and policy drops,
+        which all carry a reason and are all packets an observer wants.
         """
         self._publish_to_glass(packet_record, "packet")
 
@@ -270,7 +277,7 @@ class StorageCollector:
             except Exception as e:
                 logger.debug(f"WebSocket broadcast failed: {e}")
 
-        if skip_mqtt and packet_record.get("drop_reason"):
+        if skip_mqtt:
             logger.debug(
                 "Skipping mqtt publish for invalid packet: %s",
                 packet_record.get("drop_reason"),
