@@ -5,7 +5,7 @@ import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from repeater.data_acquisition.storage_collector import StorageCollector
 
@@ -77,7 +77,7 @@ def test_broadcast_stats_once_queries_and_broadcasts():
 
     collector._broadcast_stats_once()
 
-    collector.sqlite_handler.get_packet_stats.assert_called_once_with(hours=24)
+    collector.sqlite_handler.get_packet_stats.assert_called_once_with(hours=24, radio_profiles=ANY)
     assert collector.websocket_broadcast_stats.call_count == 1
     payload = collector.websocket_broadcast_stats.call_args.args[0]
     assert payload["packet_stats"] == {"total_packets": 1}

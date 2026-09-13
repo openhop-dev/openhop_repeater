@@ -6,6 +6,7 @@ import secrets
 import time
 from collections import OrderedDict, deque
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -34,6 +35,7 @@ from openhop_core.protocol.packet_utils import (
 )
 
 from repeater.airtime import AirtimeManager
+from repeater.config import fabric_origin_tx
 from repeater.data_acquisition import StorageCollector
 from repeater.modem_config import normalize_modem_config, redact_modem_tokens_in_place
 from repeater.neighbour_links import NeighbourLinkTracker
@@ -108,6 +110,51 @@ class ForwardResult(tuple):
         return result
 
 
+@dataclass
+class RadioTxResult:
+    """Outcome of one physical transmission through one radio endpoint."""
+
+    radio_id: Optional[str]
+    success: bool
+    metadata: Optional[dict] = None
+    error: Optional[BaseException] = None
+
+
+@dataclass
+class FanoutTxResult:
+    """Per-egress outcomes of one logical transmission, in attempt order.
+
+    One logical packet can go out through several Fabric radios; each egress
+    succeeds or fails on its own, and the logical send succeeds when any does.
+    """
+
+    results: list = field(default_factory=list)
+
+    @property
+    def any_success(self) -> bool:
+        return any(result.success for result in self.results)
+
+    @property
+    def all_success(self) -> bool:
+        return bool(self.results) and all(result.success for result in self.results)
+
+    @property
+    def successful_radio_ids(self) -> list:
+        return [r.radio_id for r in self.results if r.success and r.radio_id]
+
+    @property
+    def failed_radio_ids(self) -> list:
+        return [r.radio_id for r in self.results if not r.success and r.radio_id]
+
+    @property
+    def primary(self) -> Optional[RadioTxResult]:
+        """The first successful egress, else the first one attempted."""
+        for result in self.results:
+            if result.success:
+                return result
+        return self.results[0] if self.results else None
+
+
 class RepeaterHandler(BaseHandler):
     @staticmethod
     def payload_type() -> int:
@@ -161,6 +208,10 @@ class RepeaterHandler(BaseHandler):
             config.get("mesh", {}).get("loop_detect", LOOP_DETECT_OFF)
         )
         self.neighbour_link_tracker = NeighbourLinkTracker(config)
+        # (packet hash, path) -> recent physical sends, each with its radio and
+        # timing. Two radios sharing one frequency hear each other send; that echo
+        # ends in our own path hash and must not make this node its own neighbour.
+        self._recent_own_tx: OrderedDict = OrderedDict()
 
         radio = dispatcher.radio if dispatcher else None
         if radio:
@@ -328,7 +379,15 @@ class RepeaterHandler(BaseHandler):
             or getattr(packet, "_rx_radio_id", None)
             or getattr(packet, "rx_radio_id", None)
         )
-        preferred_tx_radio_id = self._resolve_bridge_pair_tx_radio(rx_radio_id)
+        tx_radio_ids_sent = None
+        if local_transmission and not rx_radio_id:
+            # Originated here: companion, repeater/room identity, protocol reply.
+            tx_radio_ids = self._resolve_origin_tx_radio_ids()
+        else:
+            # Heard on RF and being repeated. A helper re-emitting a received
+            # packet through the local path (TRACE forwarding) still carries its
+            # ingress radio, so it resolves as the relay it is.
+            tx_radio_ids = self._resolve_relay_tx_radio_ids(rx_radio_id)
 
         original_path_hashes = packet.get_path_hashes_hex()
         path_hash_size = packet.get_path_hash_size()
@@ -346,15 +405,17 @@ class RepeaterHandler(BaseHandler):
                 self.radio_config["coding_rate"],
                 self.radio_config["preamble_length"],
             ).score
-            self.neighbour_link_tracker.observe(
-                packet,
-                route_type=route_type,
-                payload_type=payload_type,
-                rssi=rssi,
-                snr=snr,
-                score=score,
-                is_duplicate=(pkt_hash_full in self.seen_packets),
-            )
+            if not self._is_own_echo(pkt_hash_full, original_path_hashes, rx_radio_id):
+                self.neighbour_link_tracker.observe(
+                    packet,
+                    route_type=route_type,
+                    payload_type=payload_type,
+                    rssi=rssi,
+                    snr=snr,
+                    score=score,
+                    is_duplicate=(pkt_hash_full in self.seen_packets),
+                    rx_radio_id=rx_radio_id,
+                )
 
         # Process for forwarding (skip if repeat disabled or if this is a local transmission).
         # Pass pkt_hash_full so flood_forward / direct_forward don't recompute SHA-256.
@@ -385,20 +446,29 @@ class RepeaterHandler(BaseHandler):
 
             # MeshCore queues multi-ack redundancy copies ahead of the primary
             # ACK at the same scheduled time, so create their TX tasks first.
-            # Each task re-checks the duty-cycle gate before transmitting.
+            # Each task re-checks the duty-cycle gate before transmitting, and
+            # every packet from one forwarding decision shares its egress set.
+            # A fan-out decides send-time normalisation (flood scope, hash mode)
+            # up front; do it before metering so every duty-cycle gate sees the
+            # bytes that actually go on air.
+            fanout = bool(tx_radio_ids) and len(tx_radio_ids) > 1
             extra_tx_tasks = []
             for extra_pkt, extra_delay in getattr(result, "extras", ()):
+                if fanout:
+                    self._freeze_tx_normalisation(extra_pkt)
                 extra_airtime_ms = self.airtime_mgr.calculate_airtime(extra_pkt.get_raw_length())
                 extra_tx_tasks.append(
-                    await self.schedule_retransmit(
+                    (
                         extra_pkt,
-                        extra_delay,
-                        extra_airtime_ms,
-                        preferred_tx_radio_id=preferred_tx_radio_id,
+                        await self._schedule_egress_tx(
+                            extra_pkt, extra_delay, extra_airtime_ms, tx_radio_ids
+                        ),
                     )
                 )
 
             # Check duty-cycle before scheduling TX
+            if fanout:
+                self._freeze_tx_normalisation(fwd_pkt)
             airtime_ms = self.airtime_mgr.calculate_airtime(fwd_pkt.get_raw_length())
 
             can_tx, wait_time = self.airtime_mgr.can_transmit(airtime_ms)
@@ -409,80 +479,66 @@ class RepeaterHandler(BaseHandler):
             lbt_backoff_delays_ms = None
             lbt_channel_busy = False
 
-            if not can_tx:
-                if local_transmission:
+            if not can_tx and not local_transmission:
+                logger.warning(
+                    f"Duty-cycle limit exceeded. Airtime={airtime_ms:.1f}ms, "
+                    f"wait={wait_time:.1f}s before retry"
+                )
+                self.dropped_count += 1
+                drop_reason = DropReason.DUTY_CYCLE_LIMIT
+            else:
+                if can_tx:
+                    failure_reason = "TX failed"
+                    failure_label = "Local TX failed"
+                else:
                     # Defer local TX until duty cycle allows instead of dropping
-                    deferred_delay = delay + wait_time
                     logger.info(
                         f"Duty-cycle limit: deferring local TX by {wait_time:.1f}s "
                         f"(airtime={airtime_ms:.1f}ms)"
                     )
-                    tx_task = await self.schedule_retransmit(
-                        fwd_pkt,
-                        deferred_delay,
-                        airtime_ms,
-                        local_transmission=True,
-                        preferred_tx_radio_id=preferred_tx_radio_id,
-                    )
-                    try:
-                        tx_success = await tx_task
-                    except Exception as e:
-                        transmitted = False
-                        drop_reason = "TX failed (deferred)"
-                        logger.warning(f"Deferred local TX failed: {e}")
-                        raise
-                    if not tx_success:
-                        transmitted = False
-                        drop_reason = "TX failed (deferred)"
-                        self.dropped_count += 1
-                    else:
-                        self.forwarded_count += 1
-                        transmitted = True
-                    tx_metadata = getattr(fwd_pkt, "_tx_metadata", None)
-                    if tx_metadata:
-                        tx_radio_id = tx_metadata.get("radio_id") or tx_metadata.get("tx_radio_id")
-                        lbt_attempts = tx_metadata.get("lbt_attempts", 0)
-                        lbt_backoff_delays_ms = tx_metadata.get("lbt_backoff_delays_ms", [])
-                        lbt_channel_busy = tx_metadata.get("lbt_channel_busy", False)
-                        if lbt_attempts > 0:
-                            total_lbt_delay = sum(lbt_backoff_delays_ms)
-                            logger.info(
-                                f"LBT: {lbt_attempts} attempts, "
-                                f"{total_lbt_delay:.0f}ms delay, "
-                                f"backoffs={lbt_backoff_delays_ms}"
-                            )
-                else:
-                    logger.warning(
-                        f"Duty-cycle limit exceeded. Airtime={airtime_ms:.1f}ms, "
-                        f"wait={wait_time:.1f}s before retry"
-                    )
-                    self.dropped_count += 1
-                    drop_reason = DropReason.DUTY_CYCLE_LIMIT
-            else:
-                tx_task = await self.schedule_retransmit(
+                    delay += wait_time
+                    failure_reason = "TX failed (deferred)"
+                    failure_label = "Deferred local TX failed"
+                tx_task = await self._schedule_egress_tx(
                     fwd_pkt,
                     delay,
                     airtime_ms,
+                    tx_radio_ids,
                     local_transmission=local_transmission,
-                    preferred_tx_radio_id=preferred_tx_radio_id,
                 )
                 try:
-                    tx_success = await tx_task
+                    tx_result = await self._await_egress_tx(tx_task, fwd_pkt)
                 except Exception as e:
                     transmitted = False
-                    drop_reason = "TX failed"
-                    logger.warning(f"Local TX failed: {e}")
+                    drop_reason = failure_reason
+                    logger.warning(f"{failure_label}: {e}")
                     raise
-                if not tx_success:
-                    transmitted = False
-                    drop_reason = "TX failed"
-                    self.dropped_count += 1
-                else:
+                # One logical forward, however many radios carried it: the
+                # per-radio sent_flood/sent_direct counters track physical sends.
+                if tx_result.any_success:
                     self.forwarded_count += 1
                     transmitted = True
-                tx_metadata = getattr(fwd_pkt, "_tx_metadata", None)
+                else:
+                    transmitted = False
+                    drop_reason = failure_reason
+                    self.dropped_count += 1
+
+                if len(tx_result.results) > 1 and not tx_result.all_success:
+                    logger.warning(
+                        "Fan-out %s TX failure: %s successful=%s failed=%s",
+                        "partial" if tx_result.any_success else "total",
+                        f"rx_radio={rx_radio_id}" if rx_radio_id else "origin=local",
+                        tx_result.successful_radio_ids,
+                        tx_result.failed_radio_ids,
+                    )
+                tx_radio_ids_sent = tx_result.successful_radio_ids or None
+
+                # Scalar TX fields describe the primary egress.
+                primary = tx_result.primary
+                if primary is not None and primary.success:
+                    tx_radio_id = primary.radio_id
+                tx_metadata = primary.metadata if primary is not None else None
                 if tx_metadata:
-                    tx_radio_id = tx_metadata.get("radio_id") or tx_metadata.get("tx_radio_id")
                     lbt_attempts = tx_metadata.get("lbt_attempts", 0)
                     lbt_backoff_delays_ms = tx_metadata.get("lbt_backoff_delays_ms", [])
                     lbt_channel_busy = tx_metadata.get("lbt_channel_busy", False)
@@ -496,9 +552,9 @@ class RepeaterHandler(BaseHandler):
 
             # Redundancy copies ride alongside the primary result: collect them
             # without letting a failed extra change the primary outcome.
-            for extra_task in extra_tx_tasks:
+            for extra_pkt, extra_task in extra_tx_tasks:
                 try:
-                    if await extra_task:
+                    if (await self._await_egress_tx(extra_task, extra_pkt)).any_success:
                         self.forwarded_count += 1
                 except Exception as e:
                     logger.warning(f"Multi-ack redundancy TX failed: {e}")
@@ -576,6 +632,7 @@ class RepeaterHandler(BaseHandler):
             tx_delay_ms=tx_delay_ms,
             rx_radio_id=rx_radio_id,
             tx_radio_id=tx_radio_id,
+            tx_radio_ids=tx_radio_ids_sent,
             lbt_attempts=lbt_attempts,
             lbt_backoff_delays_ms=lbt_backoff_delays_ms,
             lbt_channel_busy=lbt_channel_busy,
@@ -689,6 +746,84 @@ class RepeaterHandler(BaseHandler):
             return
         self._append_recent_packet(packet_record)
 
+    # Another radio of this node hears a send only while it is on the air or
+    # shortly after, allowing for a remote modem's delivery delay.
+    OWN_ECHO_MARGIN_SECONDS = 2.0
+    # A send that never reports back stops counting after this long.
+    OWN_ECHO_INFLIGHT_LIMIT_SECONDS = 60.0
+    OWN_ECHO_MAX_ENTRIES = 256
+
+    def _note_own_send_started(self, packet: Packet, radio_id: Optional[str]):
+        """Record a physical send about to go on air; return a handle for its outcome.
+
+        Only on a node with two or more radios: a lone radio cannot hear itself.
+        """
+        _, radio_ids = self._fabric_endpoints()
+        if not radio_ids or len(radio_ids) < 2:
+            return None
+        path_hashes = packet.get_path_hashes_hex()
+        if not path_hashes:
+            return None
+        key = (packet.calculate_packet_hash().hex().upper(), tuple(path_hashes))
+        record = {"radio_id": radio_id, "started": time.monotonic(), "finished": None}
+        sends = self._recent_own_tx.pop(key, [])
+        sends.append(record)
+        self._recent_own_tx[key] = sends
+        while len(self._recent_own_tx) > self.OWN_ECHO_MAX_ENTRIES:
+            self._recent_own_tx.popitem(last=False)
+        return key, record
+
+    def _note_own_send_finished(self, handle, packet: Packet, *, sent: bool) -> None:
+        """Close a send: keep it for its echo window, or forget it if nothing went on air."""
+        if handle is None:
+            return
+        key, record = handle
+        if record["finished"] is not None:
+            return
+        record["finished"] = time.monotonic()
+        if not sent:
+            sends = [r for r in self._recent_own_tx.get(key, []) if r is not record]
+            if sends:
+                self._recent_own_tx[key] = sends
+            else:
+                self._recent_own_tx.pop(key, None)
+            return
+        if record["radio_id"] is None:
+            metadata = getattr(packet, "_tx_metadata", None)
+            if isinstance(metadata, dict):
+                record["radio_id"] = metadata.get("radio_id") or metadata.get("tx_radio_id")
+
+    def _own_send_is_live(self, record: dict, now: float) -> bool:
+        if record["finished"] is None:
+            return now - record["started"] <= self.OWN_ECHO_INFLIGHT_LIMIT_SECONDS
+        return now - record["finished"] <= self.OWN_ECHO_MARGIN_SECONDS
+
+    def _is_own_echo(self, packet_hash: str, path_hashes, rx_radio_id) -> bool:
+        """True when another radio of this node is hearing our own transmission.
+
+        The reception must carry exactly the path we sent, arrive on a radio other
+        than the one that sent it, and arrive while that send is on the air or
+        within OWN_ECHO_MARGIN_SECONDS of it finishing. A neighbour repeating our
+        copy appends its own hash; one whose 1-byte hash collides with ours is only
+        mistaken for an echo if it repeats the same packet on the same path inside
+        that window.
+        """
+        if rx_radio_id is None or not path_hashes or not self._recent_own_tx:
+            return False
+        now = time.monotonic()
+        while self._recent_own_tx:
+            sends = next(iter(self._recent_own_tx.values()))
+            if any(self._own_send_is_live(record, now) for record in sends):
+                break
+            self._recent_own_tx.popitem(last=False)
+        for record in self._recent_own_tx.get((packet_hash, tuple(path_hashes)), ()):
+            if not self._own_send_is_live(record, now):
+                continue
+            sender = record["radio_id"]
+            if sender is None or str(sender) != str(rx_radio_id):
+                return True
+        return False
+
     def record_duplicate(self, packet: Packet, rssi: int = 0, snr: float = 0.0) -> None:
         """Record a known-duplicate packet for UI/storage visibility without forwarding.
 
@@ -723,15 +858,18 @@ class RepeaterHandler(BaseHandler):
             self.radio_config["coding_rate"],
             self.radio_config["preamble_length"],
         ).score
-        self.neighbour_link_tracker.observe(
-            packet,
-            route_type=route_type,
-            payload_type=payload_type,
-            rssi=float(rssi),
-            snr=float(snr),
-            score=score,
-            is_duplicate=True,
-        )
+        rx_radio_id = getattr(packet, "_rx_radio_id", None) or getattr(packet, "rx_radio_id", None)
+        if not self._is_own_echo(pkt_hash_full, original_path_hashes, rx_radio_id):
+            self.neighbour_link_tracker.observe(
+                packet,
+                route_type=route_type,
+                payload_type=payload_type,
+                rssi=float(rssi),
+                snr=float(snr),
+                score=score,
+                is_duplicate=True,
+                rx_radio_id=rx_radio_id,
+            )
 
         packet_record = self._build_packet_record(
             packet,
@@ -826,12 +964,17 @@ class RepeaterHandler(BaseHandler):
         tx_delay_ms: float = 0.0,
         rx_radio_id: Optional[str] = None,
         tx_radio_id: Optional[str] = None,
+        tx_radio_ids=None,
         lbt_attempts: int = 0,
         lbt_backoff_delays_ms=None,
         lbt_channel_busy: bool = False,
         packet_hash: Optional[str] = None,
     ) -> dict:
-        """Build a single packet_record dict for storage and recent_packets."""
+        """Build a single packet_record dict for storage and recent_packets.
+
+        ``tx_radio_id`` is the primary successful egress; ``tx_radio_ids`` lists
+        every radio that successfully transmitted this logical packet.
+        """
         pkt_hash = packet_hash or packet.calculate_packet_hash().hex().upper()
         payload = getattr(packet, "payload", None)
         payload_len = len(payload or b"")
@@ -883,6 +1026,7 @@ class RepeaterHandler(BaseHandler):
             or getattr(packet, "_rx_radio_id", None)
             or getattr(packet, "rx_radio_id", None),
             "tx_radio_id": tx_radio_id,
+            "tx_radio_ids": list(tx_radio_ids) if tx_radio_ids else None,
             "airtime_ms": airtime_ms,
             "transmitted": transmitted,
             "is_duplicate": is_duplicate,
@@ -1681,6 +1825,9 @@ class RepeaterHandler(BaseHandler):
                             )
                             return False
 
+                    # Registered as the send starts: another radio of this node can
+                    # hear it while it is still on the air.
+                    own_send = self._note_own_send_started(fwd_pkt, preferred_tx_radio_id)
                     try:
                         if preferred_tx_radio_id:
                             try:
@@ -1695,6 +1842,7 @@ class RepeaterHandler(BaseHandler):
                                 )
                         else:
                             sent = await self.dispatcher.send_packet(fwd_pkt, wait_for_ack=False)
+                        self._note_own_send_finished(own_send, fwd_pkt, sent=bool(sent))
                         if not sent:
                             logger.warning(
                                 "Retransmit failed (attempt %d): dispatcher returned false",
@@ -1713,6 +1861,7 @@ class RepeaterHandler(BaseHandler):
                         )
                         return True
                     except Exception as e:
+                        self._note_own_send_finished(own_send, fwd_pkt, sent=False)
                         logger.error(f"Retransmit failed (attempt {attempt + 1}): {e}")
                         if local_transmission and attempt == 0:
                             pass  # release lock, outer loop sleeps, then retries
@@ -1722,35 +1871,194 @@ class RepeaterHandler(BaseHandler):
 
         return asyncio.create_task(delayed_send())
 
-    def _resolve_bridge_pair_tx_radio(self, rx_radio_id: Optional[str]) -> Optional[str]:
-        """Return deterministic pair TX radio for bridge mode (A->B, B->A).
+    async def schedule_retransmit_fanout(
+        self,
+        fwd_pkt: Packet,
+        delay: float,
+        airtime_ms: float,
+        radio_ids,
+        *,
+        local_transmission: bool = False,
+    ):
+        """Schedule one logical packet as one physical TX per radio; return the task.
 
-        This applies only when fabric.tx_mode=bridge and exactly two radios are
-        registered. For all other layouts, return None and let the dispatcher/
-        fabric choose via existing logic.
+        The task resolves to a ``FanoutTxResult``. Each egress runs through
+        ``schedule_retransmit`` — duty-cycle gate, TX lock, local retry and
+        per-radio link wait — so the sends stay serialised and one radio's
+        failure never stops another's.
+
+        The first egress transmits ``fwd_pkt`` itself, so TX-time side effects
+        (flood scope, ``_tx_metadata``) land where callers already look. Every
+        other egress gets its own copy, so one send's metadata never overwrites
+        another's.
         """
+        radio_ids = tuple(radio_ids)
+        self._freeze_tx_normalisation(fwd_pkt)
+        packets = [fwd_pkt] + [copy.deepcopy(fwd_pkt) for _ in radio_ids[1:]]
+
+        async def run() -> FanoutTxResult:
+            await asyncio.sleep(delay)
+            # One shared delay, then the per-egress sends are created in order with
+            # no further sleep. When every radio is ready they reach the TX lock in
+            # egress order (asyncio runs ready tasks and grants the lock FIFO), so
+            # the primary egress gets the first claim on the duty-cycle budget. A
+            # local send whose radio link is down waits outside the lock, so a
+            # healthy radio later in the order is not held up by it and may go first.
+            tasks = [
+                await self.schedule_retransmit(
+                    pkt,
+                    0.0,
+                    airtime_ms,
+                    local_transmission=local_transmission,
+                    preferred_tx_radio_id=radio_id,
+                )
+                for pkt, radio_id in zip(packets, radio_ids)
+            ]
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            results = []
+            for radio_id, pkt, outcome in zip(radio_ids, packets, outcomes):
+                if isinstance(outcome, BaseException):
+                    logger.warning("Fan-out TX via %s failed: %s", radio_id, outcome)
+                    results.append(RadioTxResult(radio_id, False, error=outcome))
+                    continue
+                metadata = getattr(pkt, "_tx_metadata", None) if outcome else None
+                results.append(
+                    RadioTxResult(
+                        radio_id,
+                        bool(outcome),
+                        metadata=metadata if isinstance(metadata, dict) else None,
+                    )
+                )
+            return FanoutTxResult(results)
+
+        return asyncio.create_task(run())
+
+    def _freeze_tx_normalisation(self, pkt: Packet) -> None:
+        """Apply the dispatcher's send-time normalisation once and mark it decided.
+
+        The dispatcher resolves flood scope and the default path-hash mode at
+        send time. Fan-out sends the same logical packet several times, possibly
+        seconds apart (link wait, retry backoff), so a live change to the node's
+        default region or hash mode in between would put different bytes on each
+        radio. Deciding both on the logical packet before it is copied keeps
+        every egress, and the packet the router echoes, identical.
+        """
+        for hook in ("_apply_flood_scope", "_apply_default_path_hash_mode"):
+            apply = getattr(self.dispatcher, hook, None)
+            if callable(apply):
+                apply(pkt)
+        pkt._flood_scope_applied = True
+        pkt._path_hash_mode_applied = True
+
+    async def _schedule_egress_tx(
+        self,
+        fwd_pkt: Packet,
+        delay: float,
+        airtime_ms: float,
+        tx_radio_ids: Optional[Tuple[str, ...]],
+        *,
+        local_transmission: bool = False,
+    ):
+        """Schedule a TX over the resolved egress set.
+
+        One egress (or none, leaving the choice to the fabric) keeps the plain
+        ``schedule_retransmit`` path, whose task resolves to a bool and raises on
+        a relay send error; more than one fans out.
+        """
+        if tx_radio_ids and len(tx_radio_ids) > 1:
+            return await self.schedule_retransmit_fanout(
+                fwd_pkt,
+                delay,
+                airtime_ms,
+                tx_radio_ids,
+                local_transmission=local_transmission,
+            )
+        return await self.schedule_retransmit(
+            fwd_pkt,
+            delay,
+            airtime_ms,
+            local_transmission=local_transmission,
+            preferred_tx_radio_id=tx_radio_ids[0] if tx_radio_ids else None,
+        )
+
+    @staticmethod
+    async def _await_egress_tx(tx_task, fwd_pkt: Packet) -> FanoutTxResult:
+        """Await a task from ``_schedule_egress_tx`` as a ``FanoutTxResult``.
+
+        A single-egress send error propagates, exactly as it did before fan-out.
+        """
+        outcome = await tx_task
+        if isinstance(outcome, FanoutTxResult):
+            return outcome
+        metadata = getattr(fwd_pkt, "_tx_metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else None
+        radio_id = (metadata.get("radio_id") or metadata.get("tx_radio_id")) if metadata else None
+        return FanoutTxResult([RadioTxResult(radio_id, bool(outcome), metadata=metadata)])
+
+    def _fabric_cfg(self) -> dict:
         fabric_cfg = self.config.get("fabric")
-        if not isinstance(fabric_cfg, dict):
-            return None
+        return fabric_cfg if isinstance(fabric_cfg, dict) else {}
+
+    def _fabric_endpoints(self):
+        """Return ``(fabric, radio_ids)`` for a multi-radio fabric, else ``(None, None)``."""
+        radio = getattr(self.dispatcher, "radio", None)
+        fabric = getattr(radio, "fabric", None)
+        radios = getattr(fabric, "radios", None)
+        # isinstance, not truthiness: RFFabric.radios is an OrderedDict, and a
+        # stand-in attribute on a non-fabric radio must not read as endpoints.
+        if not isinstance(radios, Mapping):
+            return None, None
+        return fabric, [str(rid) for rid in radios.keys()]
+
+    def _resolve_relay_tx_radio_ids(self, rx_radio_id: Optional[str]) -> Optional[Tuple[str, ...]]:
+        """Egress radios for a packet heard on ``rx_radio_id`` and being repeated.
+
+        Applies only when fabric.tx_mode=bridge and exactly two radios are
+        registered: the bridge target (the other radio) comes first, followed by
+        the ingress radio itself when fabric.repeat_on_ingress is true. For all
+        other layouts return None and let the dispatcher/fabric choose via
+        existing logic.
+        """
+        fabric_cfg = self._fabric_cfg()
         if str(fabric_cfg.get("tx_mode", "default")).strip().lower() != "bridge":
             return None
         if not rx_radio_id:
             return None
 
-        radio = getattr(self.dispatcher, "radio", None)
-        fabric = getattr(radio, "fabric", None)
-        radios = getattr(fabric, "radios", None)
-        if radios is None:
-            return None
-
-        ids = list(radios.keys())
-        if len(ids) != 2:
+        _, ids = self._fabric_endpoints()
+        if ids is None or len(ids) != 2:
             return None
 
         rx_id = str(rx_radio_id)
         if rx_id not in ids:
             return None
-        return ids[1] if ids[0] == rx_id else ids[0]
+        bridge_id = ids[1] if ids[0] == rx_id else ids[0]
+        if fabric_cfg.get("repeat_on_ingress") is True:
+            return (bridge_id, rx_id)
+        return (bridge_id,)
+
+    def _resolve_bridge_pair_tx_radio(self, rx_radio_id: Optional[str]) -> Optional[str]:
+        """Return deterministic pair TX radio for bridge mode (A->B, B->A)."""
+        radio_ids = self._resolve_relay_tx_radio_ids(rx_radio_id)
+        return radio_ids[0] if radio_ids else None
+
+    def _resolve_origin_tx_radio_ids(self) -> Optional[Tuple[str, ...]]:
+        """Egress radios for a packet this node originates.
+
+        With fabric.origin_tx=all and exactly two radios, every radio, the
+        default radio first. Otherwise None: the existing fabric selection
+        (default radio / tx_mode selector) stays authoritative.
+        """
+        if fabric_origin_tx(self._fabric_cfg()) != "all":
+            return None
+        fabric, ids = self._fabric_endpoints()
+        if ids is None or len(ids) != 2:
+            return None
+        default_id = getattr(fabric, "default_radio_id", None)
+        if isinstance(default_id, str) and default_id in ids:
+            ids.remove(default_id)
+            ids.insert(0, default_id)
+        return tuple(ids)
 
     def _record_packet_sent(self, packet: Packet) -> None:
         """Record a packet send for flood/direct stats (forwarded and originated)."""

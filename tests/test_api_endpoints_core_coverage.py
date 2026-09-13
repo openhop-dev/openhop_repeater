@@ -2,7 +2,7 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, mock_open, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, mock_open, patch
 
 import cherrypy
 import pytest
@@ -976,9 +976,9 @@ def test_packet_and_route_stats_endpoints(cherrypy_ctx):
     assert api.packet_type_stats("12") == {"success": True, "data": {"types": {1: 3}}}
     assert api.route_stats("6") == {"success": True, "data": {"routes": {2: 5}}}
 
-    storage.get_packet_stats.assert_called_once_with(hours=24)
+    storage.get_packet_stats.assert_called_once_with(hours=24, radio_profiles=ANY)
     storage.get_packet_type_stats.assert_called_once_with(hours=12)
-    storage.get_route_stats.assert_called_once_with(hours=6)
+    storage.get_route_stats.assert_called_once_with(hours=6, radio_profiles=ANY)
 
 
 def test_neighbor_links_endpoint_returns_snapshot(cherrypy_ctx):
@@ -1002,7 +1002,7 @@ def test_neighbor_links_endpoint_returns_snapshot(cherrypy_ctx):
     assert result["data"]["active_within_seconds"] == 120.0
     assert result["data"]["limit"] == 1
     assert result["data"]["links"][0]["peer_hash"] == "AB"
-    tracker.snapshot.assert_called_once_with(active_within_seconds=120.0)
+    tracker.snapshot.assert_called_once_with(active_within_seconds=120.0, radio_ids=ANY)
 
 
 def test_neighbor_link_history_endpoint_filters_by_hash_and_size(cherrypy_ctx):
@@ -1026,6 +1026,8 @@ def test_neighbor_link_history_endpoint_filters_by_hash_and_size(cherrypy_ctx):
         hours=12,
         limit=50,
         bucket_seconds=None,
+        radio_id=None,
+        by_radio=False,
     )
 
 
@@ -1042,6 +1044,56 @@ def test_neighbor_link_history_endpoint_buckets(cherrypy_ctx):
     assert "rows" not in data
     assert (data["bucket_seconds"], data["buckets"], data["count"]) == (60, buckets, 2)
     assert storage.get_neighbor_link_history.call_args.kwargs["bucket_seconds"] == 60
+
+
+def test_neighbor_link_history_endpoint_passes_radio_filter_and_split(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    storage = SimpleNamespace(get_neighbor_link_history=MagicMock(return_value=[]))
+    _attach_storage(api, storage)
+
+    data = api.neighbor_link_history(
+        peer_hash="ab", path_hash_size="1", bucket_seconds="600", radio_id="link", by_radio="true"
+    )["data"]
+
+    assert (data["radio_id"], data["by_radio"]) == ("link", True)
+    kwargs = storage.get_neighbor_link_history.call_args.kwargs
+    assert (kwargs["radio_id"], kwargs["by_radio"]) == ("link", True)
+
+
+def test_neighbor_links_endpoint_passes_configured_radio_ids(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    tracker = SimpleNamespace(snapshot=MagicMock(return_value=[]))
+    api.daemon_instance = SimpleNamespace(
+        repeater_handler=SimpleNamespace(neighbour_link_tracker=tracker)
+    )
+    profiles = [{"radio_id": "local"}, {"radio_id": "link"}]
+
+    with patch.object(api, "_active_radio_profiles", return_value=profiles):
+        api.neighbor_links()
+
+    assert tracker.snapshot.call_args.kwargs["radio_ids"] == ["local", "link"]
+
+
+def test_radio_packet_rates_endpoint_clamps_window_and_uses_active_profiles(cherrypy_ctx):
+    del cherrypy_ctx
+    api = _make_api()
+    storage = SimpleNamespace(
+        get_radio_packet_rates=MagicMock(return_value={"bucket_seconds": 3600, "radios": []})
+    )
+    _attach_storage(api, storage)
+    profiles = [{"radio_id": "local"}, {"radio_id": "link"}]
+
+    with patch.object(api, "_active_radio_profiles", return_value=profiles):
+        result = api.radio_packet_rates(hours="500")
+
+    assert result["success"] is True
+    assert result["data"]["hours"] == 168
+    kwargs = storage.get_radio_packet_rates.call_args.kwargs
+    assert kwargs["bucket_seconds"] == 3600
+    assert kwargs["radio_profiles"] == profiles
+    assert kwargs["end_timestamp"] - kwargs["start_timestamp"] == 168 * 3600
 
 
 def test_recent_packets_and_bulk_packets(cherrypy_ctx):

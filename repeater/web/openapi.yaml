@@ -729,16 +729,60 @@ paths:
                     properties:
                       total_packets:
                         type: integer
-                      received:
+                      transmitted_packets:
                         type: integer
-                      transmitted:
+                        nullable: true
+                        description: >-
+                          Packets this node transmitted, counted once per packet however
+                          many radios sent it.
+                      dropped_packets:
                         type: integer
-                      dropped:
+                        nullable: true
+                      avg_rssi:
+                        type: number
+                      avg_snr:
+                        type: number
+                      avg_score:
+                        type: number
+                      avg_payload_length:
+                        type: number
+                      avg_tx_delay:
+                        type: number
+                      packet_types:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type:
+                              type: integer
+                            count:
+                              type: integer
+                      drop_reasons:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            reason:
+                              type: string
+                            count:
+                              type: integer
+                      radios:
+                        type: array
+                        description: >-
+                          One entry per radio, in configured order. Present only on a
+                          node with two or more radios.
+                        items:
+                          $ref: '#/components/schemas/PacketStatsRadio'
+                      unattributed_rx_count:
                         type: integer
-                      by_type:
-                        type: object
-                      by_route:
-                        type: object
+                        description: >-
+                          Receptions whose radio could not be identified. Multi-radio
+                          nodes only.
+                      unattributed_tx_count:
+                        type: integer
+                        description: >-
+                          Transmissions whose radio could not be identified.
+                          Multi-radio nodes only.
 
   /set_duty_cycle:
     post:
@@ -958,6 +1002,51 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      hours:
+                        type: integer
+                      period:
+                        type: string
+                      data_source:
+                        type: string
+                      route_totals:
+                        $ref: '#/components/schemas/RouteTotals'
+                      total_packets:
+                        type: integer
+                      radios:
+                        type: array
+                        description: >-
+                          Route mix of each radio's receptions, in configured order.
+                          Present only on a node with two or more radios.
+                        items:
+                          type: object
+                          properties:
+                            radio_id:
+                              type: string
+                            route_totals:
+                              $ref: '#/components/schemas/RouteTotals'
+                            total_packets:
+                              type: integer
+                      originated:
+                        type: object
+                        description: >-
+                          Packets this node sent itself, which no radio received.
+                          Multi-radio nodes only.
+                        properties:
+                          route_totals:
+                            $ref: '#/components/schemas/RouteTotals'
+                          total_packets:
+                            type: integer
+                      unattributed_count:
+                        type: integer
+                        description: >-
+                          Receptions whose radio could not be identified. Multi-radio
+                          nodes only.
 
   /filtered_packets:
     get:
@@ -1079,6 +1168,20 @@ paths:
             type: integer
             minimum: 60
           description: Bucket width in seconds; the answer carries `buckets` instead of `rows`.
+        - name: radio_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Only observations heard by this radio.
+        - name: by_radio
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: >-
+            With `bucket_seconds`, split each bucket per receiving radio; every bucket
+            then carries `radio_id`.
       responses:
         '200':
           description: Neighbour link history
@@ -3748,6 +3851,55 @@ paths:
               schema:
                 type: object
 
+  /radio_packet_rates:
+    get:
+      tags: [Charts]
+      summary: Get per-radio packet counts over time
+      description: >-
+        Receptions and transmissions per radio per time bucket. A relayed packet is a
+        reception on its ingress radio and a transmission on every radio that sent it,
+        so a relay fanned out across a bridge counts once on each radio.
+      parameters:
+        - name: hours
+          in: query
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 168
+        - name: bucket_seconds
+          in: query
+          description: Bucket width. Defaults to 300 for windows up to 6 hours, else 3600.
+          schema:
+            type: integer
+            minimum: 60
+            maximum: 86400
+      responses:
+        '200':
+          description: Per-radio packet counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      hours:
+                        type: integer
+                      bucket_seconds:
+                        type: integer
+                      radios:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RadioPacketRateSeries'
+                      unattributed_rx_count:
+                        type: integer
+                      unattributed_tx_count:
+                        type: integer
+
   /airtime_chart_data:
     get:
       tags: [Charts]
@@ -3768,21 +3920,28 @@ paths:
             default: 60
         - name: sf
           in: query
+          description: >-
+            Fallback spreading factor. Ignored whenever the server can read its own
+            radio profiles, which are authoritative and are never applied across
+            two Fabric radios.
           schema:
             type: integer
             default: 9
         - name: bw_hz
           in: query
+          description: Fallback bandwidth in Hz. See `sf`.
           schema:
             type: integer
             default: 62500
         - name: cr
           in: query
+          description: Fallback coding-rate denominator (5-8). See `sf`.
           schema:
             type: integer
             default: 5
         - name: preamble
           in: query
+          description: Fallback preamble length in symbols. See `sf`.
           schema:
             type: integer
             default: 17
@@ -3793,6 +3952,58 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      bucket_seconds:
+                        type: integer
+                        description: Width of each bucket in seconds.
+                      buckets:
+                        type: array
+                        description: >-
+                          Combined series across every radio, retained for UI builds
+                          that predate `radios`.
+                        items:
+                          $ref: '#/components/schemas/AirtimeBucket'
+                      rx_total:
+                        type: integer
+                        description: Reception events across every radio in the window.
+                      tx_total:
+                        type: integer
+                        description: Transmission events across every radio in the window.
+                      radios:
+                        type: array
+                        description: >-
+                          One series per active radio, in configured order. A relayed
+                          packet appears as RX on its ingress radio and TX on every
+                          radio that successfully transmitted it.
+                        items:
+                          type: object
+                          properties:
+                            radio_id:
+                              type: string
+                            profile:
+                              $ref: '#/components/schemas/AirtimeRadioProfile'
+                            buckets:
+                              type: array
+                              items:
+                                $ref: '#/components/schemas/AirtimeBucket'
+                            rx_total:
+                              type: integer
+                            tx_total:
+                              type: integer
+                      unattributed_rx_count:
+                        type: integer
+                        description: >-
+                          Receptions on a multi-radio node whose radio could not be
+                          identified (history predating radio attribution, or a radio
+                          no longer configured). Never guessed onto another radio.
+                      unattributed_tx_count:
+                        type: integer
+                        description: Transmissions with no identifiable radio. See above.
 
   /adverts_count_by_contact_type:
     get:
@@ -5155,6 +5366,47 @@ components:
                 enum: [unknown]
   schemas:
 
+    AirtimeBucket:
+      type: object
+      properties:
+        timestamp:
+          type: integer
+          description: Unix start of the bucket, floored to bucket_seconds.
+        rx_ms:
+          type: number
+          description: Receive time-on-air in this bucket, in milliseconds.
+        tx_ms:
+          type: number
+          description: Transmit time-on-air in this bucket, in milliseconds.
+        rx_count:
+          type: integer
+        tx_count:
+          type: integer
+
+    AirtimeRadioProfile:
+      type: object
+      description: >-
+        Air settings this radio's time-on-air was computed with. A null field means
+        the setting could not be read; airtime is reported as zero rather than
+        estimated from a default that was never on the air.
+      properties:
+        frequency_hz:
+          type: integer
+          nullable: true
+        bandwidth_hz:
+          type: integer
+          nullable: true
+        spreading_factor:
+          type: integer
+          nullable: true
+        coding_rate:
+          type: integer
+          nullable: true
+          description: Coding-rate denominator (5 = 4/5 ... 8 = 4/8).
+        preamble_length:
+          type: integer
+          nullable: true
+
     PluginStatus:
       type: object
       properties:
@@ -5225,6 +5477,96 @@ components:
           type: number
           description: Epoch seconds of the most recent query
 
+    PacketStatsRadio:
+      type: object
+      properties:
+        radio_id:
+          type: string
+        received:
+          type: integer
+          description: Packets this radio received, duplicates included.
+        duplicates:
+          type: integer
+        dropped:
+          type: integer
+          description: Receptions on this radio that the node did not forward.
+        transmissions:
+          type: integer
+          description: Physical transmissions on this radio.
+        avg_rssi:
+          type: number
+          nullable: true
+        avg_snr:
+          type: number
+          nullable: true
+
+    RouteTotals:
+      type: object
+      description: Packet count per route type name.
+      additionalProperties:
+        type: integer
+
+    RadioPacketRateBucket:
+      type: object
+      properties:
+        timestamp:
+          type: integer
+          description: Bucket start (Unix timestamp).
+        rx_count:
+          type: integer
+        tx_count:
+          type: integer
+
+    RadioPacketRateSeries:
+      type: object
+      properties:
+        radio_id:
+          type: string
+        rx_total:
+          type: integer
+        tx_total:
+          type: integer
+        buckets:
+          type: array
+          description: Non-empty buckets, oldest first.
+          items:
+            $ref: '#/components/schemas/RadioPacketRateBucket'
+
+    NeighborLinkRadioStats:
+      type: object
+      description: One neighbour as heard by one radio.
+      properties:
+        radio_id:
+          type: string
+        sample_count:
+          type: integer
+        duplicate_sample_count:
+          type: integer
+        first_seen:
+          type: number
+        last_seen:
+          type: number
+        age_seconds:
+          type: number
+        active:
+          type: boolean
+        last_rssi:
+          type: number
+        last_snr:
+          type: number
+        last_score:
+          type: number
+        ewma_rssi:
+          type: number
+        ewma_snr:
+          type: number
+        ewma_score:
+          type: number
+        best_score:
+          type: number
+        worst_score:
+          type: number
+
     NeighborLinkSnapshot:
       type: object
       properties:
@@ -5262,6 +5604,13 @@ components:
           type: number
         worst_score:
           type: number
+        radios:
+          type: array
+          description: >-
+            Stats per receiving radio, configured radios first. Present only on a node
+            with two or more radios.
+          items:
+            $ref: '#/components/schemas/NeighborLinkRadioStats'
 
     NeighborLinksData:
       type: object
@@ -5271,6 +5620,8 @@ components:
           items:
             $ref: '#/components/schemas/NeighborLinkSnapshot'
         active_within_seconds:
+          type: number
+        limit:
           type: integer
         count:
           type: integer
@@ -5308,6 +5659,9 @@ components:
         path_hop_count:
           type: integer
           nullable: true
+        rx_radio_id:
+          type: string
+          description: Radio that heard it; absent when not recorded.
 
     NeighborLinkHistoryData:
       type: object
@@ -5326,6 +5680,8 @@ components:
           items:
             $ref: '#/components/schemas/NeighborLinkHistoryRow'
         bucket_seconds: {type: integer, description: Bucket width in seconds; only when requested}
+        radio_id: {type: string, description: The radio filter; only when requested}
+        by_radio: {type: boolean, description: Buckets are split per radio; only when requested}
         buckets:
           type: array
           description: One summary per non-empty bucket, oldest first; only when `bucket_seconds` was requested.
@@ -5344,6 +5700,7 @@ components:
         score: {type: number, nullable: true, description: Mean score}
         rssi: {type: number, nullable: true, description: Mean RSSI}
         snr: {type: number, nullable: true, description: Mean SNR}
+        radio_id: {type: string, nullable: true, description: Receiving radio; only with by_radio}
 
     NeighborLinkHistoryResponse:
       type: object

@@ -17,6 +17,7 @@ or:
 import asyncio
 import time
 import unittest
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -61,6 +62,7 @@ def _make_handler():
     h.airtime_mgr.can_transmit.return_value = (True, 0.0)
     h.airtime_mgr.calculate_airtime.return_value = 100.0
     h._tx_lock = asyncio.Lock()
+    h._recent_own_tx = OrderedDict()
     h.sent_flood_count = 0
     h.sent_direct_count = 0
     # Stub out _record_packet_sent so it doesn't touch packet.header constants
@@ -283,6 +285,67 @@ class TestTxLockSerialisation(unittest.IsolatedAsyncioTestCase):
         _, kwargs = h.dispatcher.send_packet.call_args
         self.assertEqual(kwargs.get("radio_id"), "link")
         self.assertEqual(kwargs.get("wait_for_ack"), False)
+
+    # ── Test 7: fan-out sends are serialised, in egress order ─────────────
+
+    async def test_fanout_sends_once_per_radio_in_order_without_overlap(self):
+        """A fan-out's physical sends run one at a time, primary egress first."""
+        from openhop_core.protocol import Packet
+
+        h = _make_handler()
+        pkt = Packet()
+        pkt.header = 0x01
+        pkt.payload = bytearray(b"\x01\x02")
+        pkt.payload_len = 2
+
+        in_flight = [False]
+        overlap_detected = [False]
+        calls = []
+
+        async def send(packet, **kwargs):
+            if in_flight[0]:
+                overlap_detected[0] = True
+            in_flight[0] = True
+            calls.append((kwargs.get("radio_id"), packet))
+            await asyncio.sleep(0.02)
+            in_flight[0] = False
+            return True
+
+        h.dispatcher.send_packet.side_effect = send
+
+        task = await h.schedule_retransmit_fanout(pkt, 0.0, 0, ("link", "local"))
+        result = await task
+
+        self.assertTrue(result.all_success)
+        self.assertEqual([rid for rid, _ in calls], ["link", "local"])
+        self.assertFalse(overlap_detected[0], "fan-out sends overlapped on the radio")
+        # Each egress transmits its own Packet object.
+        self.assertIs(calls[0][1], pkt)
+        self.assertIsNot(calls[1][1], pkt)
+
+    async def test_fanout_send_error_is_isolated_to_its_radio(self):
+        """One radio raising must not stop the other egress from transmitting."""
+        from openhop_core.protocol import Packet
+
+        h = _make_handler()
+        pkt = Packet()
+        pkt.header = 0x01
+        pkt.payload = bytearray(b"\x03\x04")
+        pkt.payload_len = 2
+
+        async def send(packet, **kwargs):
+            if kwargs.get("radio_id") == "link":
+                raise RuntimeError("link down")
+            return True
+
+        h.dispatcher.send_packet.side_effect = send
+
+        result = await (await h.schedule_retransmit_fanout(pkt, 0.0, 0, ("link", "local")))
+
+        self.assertTrue(result.any_success)
+        self.assertEqual(result.successful_radio_ids, ["local"])
+        self.assertIsInstance(result.results[0].error, RuntimeError)
+        self.assertEqual(h.dispatcher.send_packet.call_count, 2)
 
 
 class TestLocalTxRadioLinkWait(unittest.IsolatedAsyncioTestCase):

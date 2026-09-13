@@ -429,6 +429,28 @@ identities:
 #     # bridge:  TX on the *other* radio (dual-freq LoRa backhaul)
 #     #          RX local -> TX link, RX link -> TX local
 #
+#   # Optional RF relay fan-out. Requires tx_mode: bridge and exactly two radios.
+#   #   false: RX local -> TX link,         RX link -> TX local
+#   #   true:  RX local -> TX link + local, RX link -> TX local + link
+#   # The bridge (other) radio is always attempted first.
+#   repeat_on_ingress: false
+#
+#   # Packets this node originates (companions, repeater identity, room servers,
+#   # protocol/discovery replies):
+#   #   default: existing Fabric TX selection (default_radio / tx_mode)
+#   #   all:     transmit once on every Fabric radio, default_radio first
+#   #            (requires exactly two radios)
+#   # Formerly local_tx_mode, which is still accepted.
+#   origin_tx: default
+#
+#   # Fan-out never runs MeshCore forwarding twice: each packet is validated,
+#   # deduplicated and path-updated once, then the same bytes are sent through
+#   # each selected radio. Those physical sends are serialised, never simultaneous,
+#   # and each passes the duty-cycle gate on its own, so a later radio can be
+#   # refused after an earlier one sent. The packet counts as forwarded when at
+#   # least one radio transmits it; a directed companion message still waits for
+#   # one ACK, accepted from either radio.
+#
 # Dual CH341 USB adapters example (different USB bus/address per radio):
 # radios:
 #   - id: local

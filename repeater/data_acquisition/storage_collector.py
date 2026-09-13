@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from repeater.config import resolve_storage_dir
+from repeater.config import build_radio_profiles, resolve_storage_dir
 
 from .mqtt_handler import MeshCoreToMqttPusher
 from .rrdtool_handler import RRDToolHandler
@@ -300,7 +300,9 @@ class StorageCollector:
 
         payload: Dict[str, Any] = {"system_stats": system_stats}
         if self._stats_broadcast_seq % self.PACKET_STATS_EVERY_N_BEATS == 0:
-            payload["packet_stats"] = self.sqlite_handler.get_packet_stats(hours=24)
+            payload["packet_stats"] = self.sqlite_handler.get_packet_stats(
+                hours=24, radio_profiles=self._radio_profiles()
+            )
         self._stats_broadcast_seq += 1
 
         self.websocket_broadcast_stats(payload)
@@ -448,8 +450,16 @@ class StorageCollector:
             severe_attempt_threshold=severe_attempt_threshold,
         )
 
-    def get_packet_stats(self, hours: int = 24) -> dict:
-        return self.sqlite_handler.get_packet_stats(hours)
+    def _radio_profiles(self) -> Optional[list]:
+        """Air settings of the configured radios, read from the live config."""
+        try:
+            return build_radio_profiles(self.config)
+        except Exception as e:
+            logger.debug(f"Radio profiles unavailable for packet stats: {e}")
+            return None
+
+    def get_packet_stats(self, hours: int = 24, radio_profiles: Optional[list] = None) -> dict:
+        return self.sqlite_handler.get_packet_stats(hours, radio_profiles=radio_profiles)
 
     def get_recent_packets(self, limit: int = 100) -> list:
         return self.sqlite_handler.get_recent_packets(limit)
@@ -484,9 +494,28 @@ class StorageCollector:
         bw_hz: int = 62500,
         cr: int = 5,
         preamble: int = 17,
+        radio_profiles: Optional[list] = None,
     ) -> dict:
         return self.sqlite_handler.get_airtime_buckets(
-            start_timestamp, end_timestamp, bucket_seconds, sf, bw_hz, cr, preamble
+            start_timestamp,
+            end_timestamp,
+            bucket_seconds,
+            sf,
+            bw_hz,
+            cr,
+            preamble,
+            radio_profiles=radio_profiles,
+        )
+
+    def get_radio_packet_rates(
+        self,
+        start_timestamp: float,
+        end_timestamp: float,
+        bucket_seconds: int = 3600,
+        radio_profiles: Optional[list] = None,
+    ) -> dict:
+        return self.sqlite_handler.get_radio_packet_rates(
+            start_timestamp, end_timestamp, bucket_seconds, radio_profiles=radio_profiles
         )
 
     def get_packet_by_hash(self, packet_hash: str) -> Optional[dict]:
@@ -503,6 +532,8 @@ class StorageCollector:
         hours: int = 24,
         limit: int = 1000,
         bucket_seconds: Optional[int] = None,
+        radio_id: Optional[str] = None,
+        by_radio: bool = False,
     ) -> list:
         return self.sqlite_handler.get_neighbor_link_history(
             peer_hash=peer_hash,
@@ -510,6 +541,8 @@ class StorageCollector:
             hours=hours,
             limit=limit,
             bucket_seconds=bucket_seconds,
+            radio_id=radio_id,
+            by_radio=by_radio,
         )
 
     def get_rrd_data(
@@ -572,8 +605,8 @@ class StorageCollector:
             logger.warning("Falling back to SQLite for packet type stats")
         return self.sqlite_handler.get_packet_type_stats(hours)
 
-    def get_route_stats(self, hours: int = 24) -> dict:
-        return self.sqlite_handler.get_route_stats(hours)
+    def get_route_stats(self, hours: int = 24, radio_profiles: Optional[list] = None) -> dict:
+        return self.sqlite_handler.get_route_stats(hours, radio_profiles=radio_profiles)
 
     def get_neighbors(self) -> dict:
         return self.sqlite_handler.get_neighbors()

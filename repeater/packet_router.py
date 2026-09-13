@@ -399,6 +399,9 @@ class PacketRouter:
         origin_hash=None,
         ack_timeout_s: float = 5.0,
     ):
+        dispatcher = getattr(self.daemon, "dispatcher", None)
+        wait_crc = None
+        ack_reservation = None
         try:
             metadata = {
                 "rssi": getattr(packet, "rssi", 0) or getattr(packet, "_rssi", 0),
@@ -416,6 +419,16 @@ class PacketRouter:
             # 0x88 echo below applies.  Set ahead of the TX so a core without the
             # matching Packet slot fails before transmitting rather than after.
             packet._injected_origin_hash = origin_hash
+
+            ptype = getattr(packet, "get_payload_type", lambda: None)()
+            if (
+                wait_for_ack
+                and ptype not in {AckHandler.payload_type(), AdvertHandler.payload_type()}
+                and dispatcher is not None
+                and hasattr(dispatcher, "wait_for_ack")
+            ):
+                wait_crc = expected_crc if expected_crc is not None else packet.get_crc()
+                ack_reservation = self._reserve_ack(dispatcher, wait_crc)
 
             # Serialize injects so one local TX completes before the next runs
             # (avoids duty-cycle or dispatcher races where a later packet goes out first)
@@ -459,41 +472,32 @@ class PacketRouter:
             # is enforced once in _companion_bridges_for_packet via the tag set above.
             await self.enqueue(packet)
 
-            if wait_for_ack:
-                ptype = getattr(packet, "get_payload_type", lambda: None)()
-                if ptype not in {
-                    AckHandler.payload_type(),
-                    AdvertHandler.payload_type(),
-                }:
-                    dispatcher = getattr(self.daemon, "dispatcher", None)
-                    if dispatcher and hasattr(dispatcher, "wait_for_ack"):
-                        try:
-                            wait_crc = (
-                                expected_crc if expected_crc is not None else packet.get_crc()
-                            )
-                            wait_timeout = (
-                                float(ack_timeout_s)
-                                if isinstance(ack_timeout_s, (int, float)) and ack_timeout_s > 0
-                                else 5.0
-                            )
-                            ack_ok = await dispatcher.wait_for_ack(wait_crc, timeout=wait_timeout)
-                            if not ack_ok:
-                                logger.warning(
-                                    "Injected packet ACK timeout (crc=%08X, timeout=%.1fs)",
-                                    wait_crc,
-                                    wait_timeout,
-                                )
-                                return False
-                        except Exception as e:
-                            logger.warning("Injected packet ACK wait failed: %s", e)
-                            return False
+            if wait_crc is not None:
+                try:
+                    wait_timeout = (
+                        float(ack_timeout_s)
+                        if isinstance(ack_timeout_s, (int, float)) and ack_timeout_s > 0
+                        else 5.0
+                    )
+                    ack_ok = await self._await_injected_ack(
+                        dispatcher, wait_crc, ack_reservation, wait_timeout
+                    )
+                    if not ack_ok:
+                        logger.warning(
+                            "Injected packet ACK timeout (crc=%08X, timeout=%.1fs)",
+                            wait_crc,
+                            wait_timeout,
+                        )
+                        return False
+                except Exception as e:
+                    logger.warning("Injected packet ACK wait failed: %s", e)
+                    return False
 
             packet_len = len(packet.payload) if packet.payload else 0
             logger.debug(
                 f"Injected packet processed by engine as local transmission ({packet_len} bytes)"
             )
             # Log protocol REQ (e.g. status/telemetry) so we can confirm target node
-            ptype = getattr(packet, "get_payload_type", lambda: None)()
             if (
                 ptype == ProtocolRequestHandler.payload_type()
                 and packet.payload
@@ -509,6 +513,43 @@ class PacketRouter:
         except Exception as e:
             logger.error(f"Error injecting packet through engine: {e}")
             return False
+        finally:
+            if ack_reservation is not None:
+                self._release_ack_reservation(dispatcher, wait_crc, ack_reservation)
+
+    @staticmethod
+    def _reserve_ack(dispatcher, crc):
+        """Register the send's one ACK waiter before its first physical TX.
+
+        With Fabric fan-out the reply can arrive on one radio while another is
+        still transmitting or waiting out a link outage, which can outlast the
+        dispatcher's cache of unclaimed ACKs (5 s). A waiter registered up
+        front catches the ACK however long the remaining sends take.
+        """
+        expect = getattr(dispatcher, "expect_ack", None)
+        release = getattr(dispatcher, "_discard_ack_waiter", None)
+        if not (callable(expect) and callable(release)):
+            return None
+        return expect(crc)
+
+    @staticmethod
+    def _release_ack_reservation(dispatcher, crc, reservation) -> None:
+        """Drop a reservation; a no-op once the ACK path has already claimed it."""
+        release = getattr(dispatcher, "_discard_ack_waiter", None)
+        if callable(release):
+            release(crc, reservation)
+
+    async def _await_injected_ack(self, dispatcher, crc, reservation, timeout: float) -> bool:
+        """Wait for the injected send's single logical ACK, from any radio."""
+        if reservation is not None:
+            # The ACK may already have arrived while the send was in progress.
+            if reservation.is_set() is True:
+                return True
+            # Hand over to the timed wait with no await in between, so exactly one
+            # waiter is registered for the CRC at any moment and nothing slips
+            # through the gap.
+            self._release_ack_reservation(dispatcher, crc, reservation)
+        return await dispatcher.wait_for_ack(crc, timeout=timeout)
 
     async def _process_queue(self):
         while self.running:

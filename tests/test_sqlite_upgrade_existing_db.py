@@ -28,7 +28,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from repeater.data_acquisition.sqlite_handler import SQLiteHandler  # noqa: E402
+from repeater.data_acquisition.sqlite_handler import (  # noqa: E402
+    AIRTIME_INDEX_COLUMNS,
+    SQLiteHandler,
+)
 
 # The packets columns that predate migration 13. Enough of the real schema for
 # the handler to treat this as an existing database rather than a fresh one.
@@ -161,6 +164,60 @@ def test_recording_works_after_upgrade(legacy_db):
     assert after == before + 1
 
 
+def test_upgrade_adds_tx_radio_ids_without_touching_existing_rows(legacy_db):
+    d, path = legacy_db
+    assert "tx_radio_ids" not in _columns(path), "fixture is not a legacy db"
+
+    SQLiteHandler(Path(d))
+
+    assert "tx_radio_ids" in _columns(path)
+    con = sqlite3.connect(path)
+    try:
+        rows = con.execute("SELECT timestamp, type, length, tx_radio_ids FROM packets").fetchall()
+    finally:
+        con.close()
+    assert rows == [(1.0, 1, 10, None)]
+
+
+def test_tx_radio_ids_round_trip_through_every_packet_read():
+    d = tempfile.mkdtemp()
+    try:
+        handler = SQLiteHandler(Path(d))
+        base = {"type": 2, "route": 1, "length": 4, "transmitted": True}
+        handler.store_packet(
+            {
+                **base,
+                "timestamp": 5.0,
+                "packet_hash": "FANOUT0000000001",
+                "rx_radio_id": "local",
+                "tx_radio_id": "link",
+                "tx_radio_ids": ["link", "local"],
+            }
+        )
+        handler.store_packet({**base, "timestamp": 6.0, "packet_hash": "SINGLE0000000002"})
+
+        con = sqlite3.connect(os.path.join(d, "repeater.db"))
+        try:
+            stored = con.execute(
+                "SELECT tx_radio_ids FROM packets WHERE packet_hash = ?", ("FANOUT0000000001",)
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert stored == '["link", "local"]'  # JSON text on disk
+
+        by_hash = handler.get_packet_by_hash("FANOUT0000000001")
+        assert by_hash["tx_radio_id"] == "link"
+        assert by_hash["tx_radio_ids"] == ["link", "local"]
+        assert handler.get_packet_by_id(by_hash["id"])["tx_radio_ids"] == ["link", "local"]
+
+        for rows in (handler.get_recent_packets(10), handler.get_filtered_packets(limit=10)):
+            by = {row["packet_hash"]: row for row in rows}
+            assert by["FANOUT0000000001"]["tx_radio_ids"] == ["link", "local"]
+            assert by["SINGLE0000000002"]["tx_radio_ids"] is None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_fresh_database_also_gets_column_and_index():
     """The fresh-install path must be unaffected by moving the index."""
     d = tempfile.mkdtemp()
@@ -169,5 +226,50 @@ def test_fresh_database_also_gets_column_and_index():
         path = os.path.join(d, "repeater.db")
         assert {"upstream_hash", "upstream_hash_size"} <= _columns(path)
         assert "idx_packets_upstream_time" in _indexes(path)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _index_columns(path, name):
+    con = sqlite3.connect(path)
+    try:
+        return tuple(row[2] for row in con.execute("PRAGMA index_info(%s)" % name))
+    finally:
+        con.close()
+
+
+def test_upgrade_widens_the_existing_airtime_index_to_radio_ids(legacy_db):
+    """An install that already built the four-column index gets it rebuilt.
+
+    CREATE INDEX IF NOT EXISTS leaves an existing index as it is, so without the
+    migration an upgraded database would keep the narrow index and the airtime
+    chart would read the row heap for every packet in its window.
+    """
+    d, path = legacy_db
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE INDEX idx_packets_airtime ON packets(timestamp, length, payload_length, transmitted)"
+    )
+    con.commit()
+    con.close()
+
+    SQLiteHandler(Path(d))
+
+    assert _index_columns(path, "idx_packets_airtime") == AIRTIME_INDEX_COLUMNS
+    con = sqlite3.connect(path)
+    try:
+        assert con.execute("SELECT timestamp, type, length FROM packets").fetchall() == [
+            (1.0, 1, 10)
+        ]
+    finally:
+        con.close()
+
+
+def test_fresh_database_airtime_index_covers_radio_ids():
+    d = tempfile.mkdtemp()
+    try:
+        SQLiteHandler(Path(d))
+        path = os.path.join(d, "repeater.db")
+        assert _index_columns(path, "idx_packets_airtime") == AIRTIME_INDEX_COLUMNS
     finally:
         shutil.rmtree(d, ignore_errors=True)
