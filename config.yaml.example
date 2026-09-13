@@ -429,6 +429,28 @@ identities:
 #     # bridge:  TX on the *other* radio (dual-freq LoRa backhaul)
 #     #          RX local -> TX link, RX link -> TX local
 #
+#   # Optional RF relay fan-out. Requires tx_mode: bridge and exactly two radios.
+#   #   false: RX local -> TX link,         RX link -> TX local
+#   #   true:  RX local -> TX link + local, RX link -> TX local + link
+#   # The bridge (other) radio is always attempted first.
+#   repeat_on_ingress: false
+#
+#   # Packets this node originates (companions, repeater identity, room servers,
+#   # protocol/discovery replies):
+#   #   default: existing Fabric TX selection (default_radio / tx_mode)
+#   #   all:     transmit once on every Fabric radio, default_radio first
+#   #            (requires exactly two radios)
+#   # Formerly local_tx_mode, which is still accepted.
+#   origin_tx: default
+#
+#   # Fan-out never runs MeshCore forwarding twice: each packet is validated,
+#   # deduplicated and path-updated once, then the same bytes are sent through
+#   # each selected radio. Those physical sends are serialised, never simultaneous,
+#   # and each passes the duty-cycle gate on its own, so a later radio can be
+#   # refused after an earlier one sent. The packet counts as forwarded when at
+#   # least one radio transmits it; a directed companion message still waits for
+#   # one ACK, accepted from either radio.
+#
 # Dual CH341 USB adapters example (different USB bus/address per radio):
 # radios:
 #   - id: local
@@ -700,6 +722,18 @@ mqtt_brokers:
   # tls:
   #   enabled: true|false # Enable TLS. If the endpoint's certificate is self-signed, the Root CA should be added to the OS's certificate store. 
   #   insecure: true|false # Validate TLS certificates
+
+  # Multi-radio nodes (see `radios:` above) additionally publish:
+  #   - `rx_radio_id` and `tx_radio_ids` on each packet: the radio that heard
+  #     it, and every radio that retransmitted it (a bridge repeating on both
+  #     sides lists both). `tx_radio_ids` is always a list; it is absent when
+  #     the packet was not repeated.
+  #   - `radios` in the status message: `[{id, radio}]` mapping each radio id
+  #     to its `MHz,kHz,SF,CR` settings, so a consumer can resolve those ids to
+  #     frequencies. Ids are unique only within a node - key on
+  #     (origin_id, id). The top-level `radio` field then reports the default
+  #     radio.
+  # Single-radio nodes publish neither, exactly as before.
 
   # Block specific packet types from being published to the MQTT endpoint
   # If not specified or empty list, all types are published

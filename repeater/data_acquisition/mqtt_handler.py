@@ -40,6 +40,26 @@ def b64url(x: bytes) -> str:
     return base64.urlsafe_b64encode(x).rstrip(b"=").decode()
 
 
+def _payload_packet_type(payload: dict) -> Optional[int]:
+    """MeshCore payload-type code of a published payload, or None.
+
+    ``type`` is the message class the MC2MQTT schema puts on the wire - the
+    literal string "PACKET" - not the packet's type. The code lives in
+    ``packet_type``, serialised as a decimal string by PacketRecord, and must
+    be read as an int to match ``disallowed_packet_types`` (which resolves
+    configured names through PAYLOAD_TYPES). Status and diagnostic payloads
+    have no packet type and are never filtered.
+    """
+    value = payload.get("packet_type")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.debug(f"Unreadable packet_type in payload: {value!r}")
+        return None
+
+
 def _summarize_payload_for_log(payload: Any, message: Optional[str] = None) -> str:
     """Return a compact single-line payload summary for debug logging."""
     if message is None:
@@ -988,10 +1008,56 @@ class MeshCoreToMqttPusher:
             "stats": {**live_stats, "errors": 0, "queue_len": 0, **(extra_stats or {})},
         }
 
+        radios = self._radio_map()
+        if radios:
+            status["radios"] = radios
+            # On a Fabric node the top-level ``radio:`` block is the base that
+            # entries inherit from, so it can describe a band no radio is
+            # actually on. Report the default radio instead, which is the one
+            # an observer that ignores ``radios`` should assume.
+            status["radio"] = self._default_radio_str(radios) or status["radio"]
+
         if location:
             status["location"] = location
 
         return self.publish("status", status, retain=True, qos=1)
+
+    def _default_radio_str(self, entries: list) -> Optional[str]:
+        """Air settings of the radio Fabric transmits on by default.
+
+        Mirrors build_radio_stack's rule: ``fabric.default_radio`` when set,
+        otherwise the first configured radio.
+        """
+        fabric = self.config.get("fabric")
+        fabric = fabric if isinstance(fabric, dict) else {}
+        default_id = fabric.get("default_radio") or fabric.get("default_radio_id")
+        if default_id:
+            for entry in entries:
+                if entry["id"] == str(default_id):
+                    return entry["radio"]
+        return entries[0]["radio"] if entries else None
+
+    def _radio_map(self) -> list:
+        """Per-radio air settings for multi-radio nodes, else an empty list.
+
+        This is what makes the ``rx_radio_id`` / ``tx_radio_ids`` on published
+        packets mean something: on its own a radio id is an operator-chosen
+        label, and only this map says which frequency it was. A node runs one
+        radio in the overwhelming majority of deployments, where the existing
+        ``radio`` field already says everything, so the map is published only
+        when there is genuinely more than one band to tell apart.
+
+        Rebuilt per status publish rather than cached at construction, because
+        air settings can be changed from the web UI while the node runs.
+        """
+        from ..config import build_radio_status_entries
+
+        try:
+            entries = build_radio_status_entries(self.config)
+        except Exception as exc:  # pragma: no cover - reporting must not break status
+            logger.debug(f"Could not build radio map for status: {exc}")
+            return []
+        return entries if len(entries) > 1 else []
 
     def publish(self, subtopic: str, payload: dict, retain: bool = False, qos: int = 0):
         """Publish message to all connected brokers"""
@@ -1002,13 +1068,13 @@ class MeshCoreToMqttPusher:
             f"Publishing topic='{subtopic}', {_summarize_payload_for_log(payload, message)}"
         )
 
-        packet_type = payload.get("type")
+        packet_type = _payload_packet_type(payload)
 
         results = []
         with self._lock:
             for conn in self.connections:
                 if conn.enabled and conn.is_connected():
-                    if packet_type in conn.disallowed_types:
+                    if packet_type is not None and packet_type in conn.disallowed_types:
                         _trace(f"Skipped publishing packet type 0x{packet_type:02X} (disallowed)")
                         continue
                     result = conn.publish(subtopic, message, retain=retain, qos=qos)

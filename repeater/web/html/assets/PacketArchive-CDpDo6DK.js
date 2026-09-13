@@ -1,0 +1,1 @@
+import{E as e,g as t,h as n,u as r}from"./runtime-core.esm-bundler-DkFx5553.js";import{t as i}from"./PacketTable-CA3hQ5lf.js";var a={class:`space-y-4`},o=t({name:`PacketArchiveView`,__name:`PacketArchive`,setup(t){return(t,o)=>(e(),r(`div`,a,[n(i,{mode:`archive`,title:`Packet Archive`,"default-hours":24})]))}});export{o as default};
