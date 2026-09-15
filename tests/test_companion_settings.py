@@ -229,7 +229,7 @@ class TestSelectCompanionContactsToTrim:
             select_companion_contacts_to_trim(contacts, 1)
 
 
-class TestSqliteRetentionTrim:
+class TestSqliteQueueCapacity:
     @staticmethod
     def _handler(tmp_path):
         from repeater.data_acquisition.sqlite_handler import SQLiteHandler
@@ -244,11 +244,15 @@ class TestSqliteRetentionTrim:
             max_messages=max_messages,
         )
 
-    def test_trims_to_max_messages(self, tmp_path):
+    def test_caps_queue_at_max_messages(self, tmp_path):
         h = self._handler(tmp_path)
         results = [self._push(h, "0x01", i, max_messages=3) for i in range(5)]
+        # Once three direct messages fill the queue there is nothing evictable,
+        # so the last two are retained as history and reported as NOT queued —
+        # the caller has to keep its in-memory copy to deliver them.
         assert results == [True, True, True, False, False]
         assert [m["text"] for m in h.companion_load_messages("0x01")] == ["m0", "m1", "m2"]
+        assert h.companion_count_messages("0x01") == 3
 
     def test_evicts_oldest_channel_message_before_direct_message(self, tmp_path):
         h = self._handler(tmp_path)
@@ -264,19 +268,26 @@ class TestSqliteRetentionTrim:
         assert [m["text"] for m in messages] == ["direct one", "direct two"]
         assert [m["is_channel"] for m in messages] == [0, 0]
 
-    def test_rejects_channel_when_queue_contains_only_direct_messages(self, tmp_path):
+    def test_keeps_channel_as_history_when_queue_contains_only_direct_messages(self, tmp_path):
         h = self._handler(tmp_path)
         for packet_hash in ("d1", "d2"):
             assert h.companion_push_message(
                 "0x01", {"text": packet_hash, "packet_hash": packet_hash}, max_messages=2
             )
 
-        assert not h.companion_push_message(
-            "0x01", {"text": "channel", "packet_hash": "c1", "is_channel": True}, max_messages=2
+        # Refused by the queue — a direct message may not be displaced — so the
+        # channel message is history only and the caller is told to keep it.
+        assert (
+            h.companion_push_message(
+                "0x01",
+                {"text": "channel", "packet_hash": "c1", "is_channel": True},
+                max_messages=2,
+            )
+            is False
         )
         assert [m["text"] for m in h.companion_load_messages("0x01")] == ["d1", "d2"]
 
-    def test_rejected_insert_keeps_existing_channels_when_limit_is_lowered(self, tmp_path):
+    def test_history_only_insert_keeps_existing_channels_when_limit_is_lowered(self, tmp_path):
         h = self._handler(tmp_path)
         existing = [
             {"text": "direct one", "packet_hash": "d1", "is_channel": False},
@@ -286,8 +297,11 @@ class TestSqliteRetentionTrim:
         for message in existing:
             assert h.companion_push_message("0x01", message)
 
-        assert not h.companion_push_message(
-            "0x01", {"text": "incoming", "packet_hash": "d3"}, max_messages=2
+        assert (
+            h.companion_push_message(
+                "0x01", {"text": "incoming", "packet_hash": "d3"}, max_messages=2
+            )
+            is False
         )
         assert [m["text"] for m in h.companion_load_messages("0x01")] == [
             "direct one",
@@ -301,7 +315,7 @@ class TestSqliteRetentionTrim:
             self._push(h, "0x01", i, max_messages=None)
         assert len(h.companion_load_messages("0x01")) == 5
 
-    def test_trim_isolated_per_companion(self, tmp_path):
+    def test_queue_capacity_isolated_per_companion(self, tmp_path):
         h = self._handler(tmp_path)
         for i in range(4):
             self._push(h, "0x01", i, max_messages=2)
@@ -413,7 +427,8 @@ class TestSenderPrefixPersistence:
             "DELETE FROM migrations "
             "WHERE migration_name IN ("
             "'add_sender_prefix_to_companion_messages', "
-            "'add_signal_and_channel_data_to_companion_messages')"
+            "'add_signal_and_channel_data_to_companion_messages', "
+            "'retain_companion_message_history')"
         )
         conn.execute("ALTER TABLE companion_messages RENAME TO companion_messages_old")
         conn.execute(
@@ -456,6 +471,7 @@ class TestSenderPrefixPersistence:
         fs.sqlite_handler = MagicMock()
         fs.companion_hash = "0x01"
         fs.sqlite_handler.companion_pop_message.return_value = {
+            "id": 1,
             "sender_key": b"\x01" * 32,
             "txt_type": 2,
             "timestamp": 42,
@@ -515,7 +531,7 @@ class TestTrimContactsOnOverflowPolicy:
         assert removed == 100
 
 
-class TestPersistSkipWhenOff:
+class TestPersistHistoryRegardlessOfQueue:
     @staticmethod
     def _frame_server(max_size):
         from repeater.companion.frame_server import CompanionFrameServer
@@ -524,25 +540,30 @@ class TestPersistSkipWhenOff:
         fs.sqlite_handler = MagicMock()
         fs.companion_hash = "0x01"
         bridge = MagicMock()
+        bridge.get_public_key.return_value = b"a" * 32
         bridge.message_queue.max_size = max_size
         fs.bridge = bridge
         return fs
 
-    def test_skips_persistence_when_retention_zero(self):
+    def test_persists_history_when_queue_zero(self):
         import asyncio
 
         entry = object()
         fs = self._frame_server(0)
         asyncio.run(fs._persist_companion_message({"text": "x"}, entry))
-        fs.sqlite_handler.companion_push_message.assert_not_called()
+        fs.sqlite_handler.companion_push_message.assert_called_once_with(
+            "0x01", {"text": "x", "companion_public_key": b"a" * 32}, 0
+        )
         fs.bridge.message_queue.remove.assert_called_once_with(entry)
 
-    def test_persists_with_retention(self):
+    def test_persists_with_queue_limit(self):
         import asyncio
 
         fs = self._frame_server(7)
         asyncio.run(fs._persist_companion_message({"text": "x"}))
-        fs.sqlite_handler.companion_push_message.assert_called_once_with("0x01", {"text": "x"}, 7)
+        fs.sqlite_handler.companion_push_message.assert_called_once_with(
+            "0x01", {"text": "x", "companion_public_key": b"a" * 32}, 7
+        )
 
     def test_keeps_memory_message_when_sqlite_rejects_it(self):
         import asyncio

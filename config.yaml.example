@@ -624,9 +624,11 @@ storage:
   retention:
     # Clean up SQLite records older than this many days
     sqlite_cleanup_days: 31
-    # Companion event journal / soft-consumed message history retention.
+    # Companion received-message history retention, by local receipt time.
     # Independent of sqlite_cleanup_days so packet RF history and companion
-    # sync history can be sized separately. Defaults to 31 when omitted.
+    # history can be sized separately. Defaults to 31 when omitted. Messages
+    # still queued for frame delivery are never expired by this key; they are
+    # bounded by the companion's offline queue limit instead.
     companion_events_days: 31
 
     # RRD archives are managed automatically:

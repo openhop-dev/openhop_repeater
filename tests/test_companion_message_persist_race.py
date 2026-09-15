@@ -28,6 +28,9 @@ _TO_THREAD = "repeater.companion.frame_server.asyncio.to_thread"
 class _Bridge:
     """Minimal bridge exposing a real in-memory offline queue."""
 
+    def get_public_key(self):
+        return b"a" * 32
+
     def __init__(self, max_size: int = 100):
         self.message_queue = MessageQueue(max_size=max_size)
 

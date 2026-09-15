@@ -129,6 +129,7 @@ async def test_frame_server_persistence_paths_and_stop():
     )
     bridge = SimpleNamespace(
         message_queue=SimpleNamespace(remove=MagicMock(), pop_last=MagicMock()),
+        get_public_key=lambda: b"a" * 32,
         sync_next_message=lambda: None,
         get_contacts=lambda: [],
         channels=SimpleNamespace(max_channels=2),
@@ -149,7 +150,9 @@ async def test_frame_server_persistence_paths_and_stop():
 
         entry = object()
         await srv._persist_companion_message({"text": "x"}, entry)
-        sqlite.companion_push_message.assert_called_once_with("h", {"text": "x"}, None)
+        sqlite.companion_push_message.assert_called_once_with(
+            "h", {"text": "x", "companion_public_key": b"a" * 32}, None
+        )
         bridge.message_queue.remove.assert_called_once_with(entry)
 
         msg = srv._sync_next_from_persistence()
@@ -238,7 +241,7 @@ async def test_restart_queue_rows_are_delivered_once_from_sqlite():
 
 
 @pytest.mark.asyncio
-async def test_rejected_queue_callback_skips_sqlite_persistence_but_notifies_client():
+async def test_rejected_queue_callback_persists_history_and_notifies_client():
     server = object.__new__(CompanionFrameServer)
     server._persist_companion_message = AsyncMock()
     server._enqueue_frame = MagicMock()
@@ -253,7 +256,7 @@ async def test_rejected_queue_callback_skips_sqlite_persistence_but_notifies_cli
         )
     )
 
-    server._persist_companion_message.assert_not_awaited()
+    server._persist_companion_message.assert_awaited_once()
     server._enqueue_frame.assert_called_once_with(bytes([PUSH_CODE_MSG_WAITING]))
 
 

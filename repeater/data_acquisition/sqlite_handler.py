@@ -818,6 +818,44 @@ class SQLiteHandler:
                     )
                     logger.info(f"Migration '{migration_name}' applied successfully")
 
+                # Migration 17: Retain received messages independently of frame delivery.
+                migration_name = "retain_companion_message_history"
+                existing = conn.execute(
+                    "SELECT migration_name FROM migrations WHERE migration_name = ?",
+                    (migration_name,),
+                ).fetchone()
+                if not existing:
+                    conn.execute("SAVEPOINT companion_history")
+                    columns = [
+                        row[1] for row in conn.execute("PRAGMA table_info(companion_messages)")
+                    ]
+                    if "pending_delivery" not in columns:
+                        conn.execute(
+                            "ALTER TABLE companion_messages ADD COLUMN pending_delivery "
+                            "INTEGER NOT NULL DEFAULT 1"
+                        )
+                    if "companion_public_key" not in columns:
+                        conn.execute(
+                            "ALTER TABLE companion_messages ADD COLUMN companion_public_key BLOB"
+                        )
+                    conn.execute("DROP INDEX IF EXISTS idx_companion_messages_dedup")
+                    conn.execute(
+                        "CREATE UNIQUE INDEX idx_companion_messages_dedup "
+                        "ON companion_messages(companion_hash, "
+                        "COALESCE(companion_public_key, X''), packet_hash) "
+                        "WHERE packet_hash IS NOT NULL"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_messages_pending "
+                        "ON companion_messages(companion_hash, id) WHERE pending_delivery = 1"
+                    )
+                    conn.execute(
+                        "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
+                        (migration_name, time.time()),
+                    )
+                    conn.execute("RELEASE SAVEPOINT companion_history")
+                    logger.info(f"Migration '{migration_name}' applied successfully")
+
                 conn.commit()
 
         except Exception as e:
@@ -2857,14 +2895,19 @@ class SQLiteHandler:
     def cleanup_old_data(self, days: int = 7, companion_events_days: Optional[int] = None):
         """Prune retention-bounded tables.
 
-        ``companion_events_days`` is forwarded from engine.py
-        (``storage.retention.companion_events_days``, default 31). Accepted here
-        so the periodic cleanup call cannot TypeError and silently skip all
-        SQLite pruning. Companion journal/history pruning is layered on by the
-        companion-api storage work once those tables exist.
+        ``companion_events_days`` (``storage.retention.companion_events_days``,
+        default 31) bounds history by local receive time. Pending frame queue
+        entries are preserved until delivered or excluded by queue capacity.
+        That exception is bounded by the high-water mark of a companion's
+        offline queue limit rather than by its current value: lowering the
+        limit does not reclaim rows already pending, and rows migrated from a
+        build that predates ``pending_delivery`` are stamped pending and are
+        never reclaimed by age.
         """
         try:
             cutoff = time.time() - (days * 24 * 3600)
+            history_days = companion_events_days if companion_events_days is not None else 31
+            history_cutoff = time.time() - (history_days * 24 * 3600)
 
             with self._connect() as conn:
                 result = conn.execute("DELETE FROM packets WHERE timestamp < ?", (cutoff,))
@@ -2887,6 +2930,12 @@ class SQLiteHandler:
                 result = conn.execute("DELETE FROM crc_errors WHERE timestamp < ?", (cutoff,))
                 crc_deleted = result.rowcount
 
+                result = conn.execute(
+                    "DELETE FROM companion_messages WHERE pending_delivery = 0 AND created_at < ?",
+                    (history_cutoff,),
+                )
+                companion_deleted = result.rowcount
+
                 conn.commit()
 
                 if (
@@ -2894,9 +2943,10 @@ class SQLiteHandler:
                     or adverts_deleted > 0
                     or noise_deleted > 0
                     or crc_deleted > 0
+                    or companion_deleted > 0
                 ):
                     logger.info(
-                        f"Cleaned up {packets_deleted} old packets, {adverts_deleted} old adverts, {noise_deleted} old noise measurements, {crc_deleted} old CRC error records"
+                        f"Cleaned up {packets_deleted} old packets, {adverts_deleted} old adverts, {noise_deleted} old noise measurements, {crc_deleted} old CRC error records, {companion_deleted} companion history messages"
                     )
 
         except Exception as e:
@@ -4114,11 +4164,12 @@ class SQLiteHandler:
             return False
 
     def companion_count_messages(self, companion_hash: str) -> int:
-        """Return the number of persisted queued messages for a companion."""
+        """Return the number of messages still pending frame delivery."""
         try:
             with self._connect() as conn:
                 cursor = conn.execute(
-                    "SELECT COUNT(*) FROM companion_messages WHERE companion_hash = ?",
+                    "SELECT COUNT(*) FROM companion_messages "
+                    "WHERE companion_hash = ? AND pending_delivery = 1",
                     (companion_hash,),
                 )
                 row = cursor.fetchone()
@@ -4130,7 +4181,7 @@ class SQLiteHandler:
     def companion_load_messages(
         self, companion_hash: str, limit: int = 100
     ) -> Optional[List[Dict]]:
-        """Load queued messages for a companion (oldest first for queue order).
+        """Load the messages still pending frame delivery (oldest first).
 
         Returns [] when the companion has no persisted messages, or None when
         the load failed — callers must not treat a failed load as "no data".
@@ -4138,13 +4189,19 @@ class SQLiteHandler:
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
+                # Ids through the partial index first; see companion_pop_message.
                 cursor = conn.execute(
                     """
                     SELECT sender_key, txt_type, timestamp, text, is_channel, channel_idx,
                            path_len, sender_prefix, snr, rssi, channel_data_type,
                            channel_data_payload
-                    FROM companion_messages WHERE companion_hash = ?
-                    ORDER BY id ASC LIMIT ?
+                    FROM companion_messages
+                    WHERE id IN (
+                        SELECT id FROM companion_messages
+                        WHERE companion_hash = ? AND pending_delivery = 1
+                        ORDER BY id ASC LIMIT ?
+                    )
+                    ORDER BY id ASC
                 """,
                     (companion_hash, limit),
                 )
@@ -4163,24 +4220,26 @@ class SQLiteHandler:
     def companion_push_message(
         self, companion_hash: str, msg: Dict, max_messages: Optional[int] = None
     ) -> bool:
-        """Append a message to the companion's queue.
+        """Retain a message in history and, if capacity permits, the frame queue.
 
-        Deduplicates by (companion_hash, packet_hash) using INSERT OR IGNORE
-        backed by the UNIQUE index added in migration 8.  This replaces the
+        Deduplicates by identity and packet_hash using INSERT OR IGNORE
+        backed by a UNIQUE index. This replaces the
         previous SELECT + INSERT round-trip (two statements, two SD-card reads)
         with a single atomic statement.
 
         When ``max_messages`` is set, capacity follows MeshCore's offline queue
         policy: evict the oldest channel message first and never displace a
-        retained direct message. The insert and any eviction share one
-        transaction.
+        pending direct message. Queue exclusion never deletes history or marks
+        a message delivered. The insert and queue changes share one transaction.
 
-        Returns True if the message is retained, False if it is a duplicate or
-        the protected queue cannot make room for it.
+        Returns True when the caller may release its in-memory copy: the row is
+        either queued for frame delivery, or deliberately undeliverable because
+        the queue is disabled. Returns False on a duplicate, on an error, and
+        when a full queue kept the message as history only — there the row is
+        committed but undelivered, and the in-memory copy is the one that still
+        has to reach the client.
         """
         try:
-            if max_messages is not None and max_messages <= 0:
-                return False
             packet_hash = msg.get("packet_hash") or None
             if isinstance(packet_hash, bytes):
                 packet_hash = packet_hash.decode("utf-8", errors="replace") if packet_hash else None
@@ -4195,8 +4254,9 @@ class SQLiteHandler:
                     INSERT OR IGNORE INTO companion_messages
                     (companion_hash, sender_key, txt_type, timestamp, text,
                      is_channel, channel_idx, path_len, sender_prefix, snr, rssi,
-                     channel_data_type, channel_data_payload, packet_hash, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     channel_data_type, channel_data_payload, packet_hash, created_at, pending_delivery,
+                     companion_public_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         companion_hash,
@@ -4214,6 +4274,8 @@ class SQLiteHandler:
                         bytes(msg.get("channel_data_payload") or b""),
                         packet_hash,
                         time.time(),
+                        int(max_messages is None or max_messages > 0),
+                        msg.get("companion_public_key"),
                     ),
                 )
                 inserted = cursor.rowcount > 0
@@ -4221,10 +4283,11 @@ class SQLiteHandler:
                     conn.execute("RELEASE SAVEPOINT companion_message_push")
                     conn.commit()
                     return False
-                if max_messages is not None:
+                if max_messages is not None and max_messages > 0:
                     last_id = cursor.lastrowid
                     count = conn.execute(
-                        "SELECT COUNT(*) FROM companion_messages WHERE companion_hash = ?",
+                        "SELECT COUNT(*) FROM companion_messages "
+                        "WHERE companion_hash = ? AND pending_delivery = 1",
                         (companion_hash,),
                     ).fetchone()[0]
                     excess = count - max_messages
@@ -4238,29 +4301,36 @@ class SQLiteHandler:
                             """
                             SELECT COUNT(*) FROM companion_messages
                             WHERE companion_hash = ? AND is_channel = 1 AND id != ?
+                              AND pending_delivery = 1
                             """,
                             (companion_hash, last_id),
                         ).fetchone()[0]
                         if evictable < excess:
-                            # Not enough channel rows to make room without
-                            # displacing a retained direct message. Undo the
-                            # insert and every would-be eviction as one unit,
-                            # keeping every prior row intact.
-                            conn.execute("ROLLBACK TO SAVEPOINT companion_message_push")
+                            # Preserve the existing queue, including its DMs;
+                            # keep the new message as history only. Report that
+                            # by returning False: the frame queue did NOT take
+                            # this message, so the caller must leave its
+                            # in-memory copy alone or nothing will deliver it.
+                            conn.execute(
+                                "UPDATE companion_messages SET pending_delivery = 0 WHERE id = ?",
+                                (last_id,),
+                            )
                             conn.execute("RELEASE SAVEPOINT companion_message_push")
                             conn.commit()
                             return False
-                        conn.execute(
-                            """
-                            DELETE FROM companion_messages
-                            WHERE id IN (
-                                SELECT id FROM companion_messages
-                                WHERE companion_hash = ? AND is_channel = 1 AND id != ?
-                                ORDER BY id ASC LIMIT ?
+                        else:
+                            conn.execute(
+                                """
+                                UPDATE companion_messages SET pending_delivery = 0
+                                WHERE id IN (
+                                    SELECT id FROM companion_messages
+                                    WHERE companion_hash = ? AND is_channel = 1 AND id != ?
+                                      AND pending_delivery = 1
+                                    ORDER BY id ASC LIMIT ?
+                                )
+                                """,
+                                (companion_hash, last_id, excess),
                             )
-                            """,
-                            (companion_hash, last_id, excess),
-                        )
                 conn.execute("RELEASE SAVEPOINT companion_message_push")
                 conn.commit()
                 return True
@@ -4268,8 +4338,15 @@ class SQLiteHandler:
             logger.error(f"Failed to push companion message: {e}")
             return False
 
-    def companion_pop_message(self, companion_hash: str) -> Optional[Dict]:
-        """Remove and return the oldest message from the companion's queue."""
+    def companion_load_history(
+        self, companion_hash: str, companion_public_key: bytes, since_id: int = 0, limit: int = 100
+    ) -> Optional[List[Dict]]:
+        """Received messages after ``since_id`` (exclusive), oldest first, with ids.
+
+        Queued and consumed rows alike: this is the mailbox a client
+        reads by cursor, not the frame queue. Returns None on failure so a
+        caller never mistakes an error for an empty page.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
@@ -4277,9 +4354,53 @@ class SQLiteHandler:
                     """
                     SELECT id, sender_key, txt_type, timestamp, text, is_channel, channel_idx,
                            path_len, sender_prefix, snr, rssi, channel_data_type,
+                           channel_data_payload, created_at
+                    FROM companion_messages
+                    WHERE companion_hash = ? AND id > ?
+                      AND companion_public_key = ?
+                    ORDER BY id ASC LIMIT ?
+                    """,
+                    (companion_hash, since_id, companion_public_key, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to load companion history for {companion_hash}: {e}")
+            return None
+
+    def companion_pop_message(self, companion_hash: str) -> Optional[Dict]:
+        """Consume the oldest frame queue entry while retaining its history row."""
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                # Reserve the writer before reading; a WAL read snapshot cannot
+                # be upgraded after another connection commits. _connect() hands
+                # back a long-lived per-thread connection, so this is not the
+                # first statement it has ever run — it is legal because it is the
+                # first of THIS operation and every other path leaves the
+                # connection in autocommit. Issue it above any statement that
+                # writes, or SQLite raises "cannot start a transaction within a
+                # transaction" and the except below reports an empty queue.
+                conn.execute("BEGIN IMMEDIATE")
+                # Select the id through the partial index and then fetch by
+                # primary key. Asking for the row's columns directly does not
+                # forbid idx_companion_messages_pending, but nothing here ever
+                # runs ANALYZE, so with no sqlite_stat1 the planner costs it the
+                # same as the plain companion_hash index and takes that one —
+                # which also satisfies ORDER BY id, and walks every retained
+                # history row for this companion on each sync. Going through the
+                # id keeps the plan O(pending) without depending on statistics.
+                # The tests pin it by tracing what actually runs.
+                cursor = conn.execute(
+                    """
+                    SELECT id, sender_key, txt_type, timestamp, text, is_channel, channel_idx,
+                           path_len, sender_prefix, snr, rssi, channel_data_type,
                            channel_data_payload
-                    FROM companion_messages WHERE companion_hash = ?
-                    ORDER BY id ASC LIMIT 1
+                    FROM companion_messages
+                    WHERE id = (
+                        SELECT id FROM companion_messages
+                        WHERE companion_hash = ? AND pending_delivery = 1
+                        ORDER BY id ASC LIMIT 1
+                    )
                 """,
                     (companion_hash,),
                 )
@@ -4292,7 +4413,10 @@ class SQLiteHandler:
                 msg["rssi"] = int(msg.get("rssi") or 0)
                 msg["channel_data_type"] = int(msg.get("channel_data_type") or 0)
                 msg["channel_data_payload"] = bytes(msg.get("channel_data_payload") or b"")
-                conn.execute("DELETE FROM companion_messages WHERE id = ?", (msg["id"],))
+                conn.execute(
+                    "UPDATE companion_messages SET pending_delivery = 0 WHERE id = ?",
+                    (msg["id"],),
+                )
                 conn.commit()
                 return {k: v for k, v in msg.items() if k != "id"}
         except Exception as e:

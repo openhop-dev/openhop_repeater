@@ -195,7 +195,8 @@ def test_legacy_schema_migrates_and_defaults(tmp_path):
     conn = sqlite3.connect(str(h.sqlite_path))
     conn.execute(
         "DELETE FROM migrations "
-        "WHERE migration_name = 'add_signal_and_channel_data_to_companion_messages'"
+        "WHERE migration_name IN ('add_signal_and_channel_data_to_companion_messages', "
+        "'retain_companion_message_history')"
     )
     conn.execute("ALTER TABLE companion_messages RENAME TO companion_messages_old")
     conn.execute(

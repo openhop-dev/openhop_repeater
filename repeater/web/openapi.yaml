@@ -4247,6 +4247,107 @@ paths:
               schema:
                 type: object
 
+  /companion/messages:
+    get:
+      tags: [System]
+      summary: Received companion message history, oldest first
+      description: |
+        Received DMs, channel text and data, ordered by ascending id; `since` is
+        exclusive. Returns `{ "success": true, "data": [...] }`. Database failures
+        return 503. Fetching neither marks messages read nor consumes the frame queue.
+
+        Each client stores its own cursor with its messages: upsert a page by id and
+        commit its last id in the same local transaction, then continue while pages
+        are full. Poll on reconnect and while connected. Scope the cache to the
+        server, authenticated user and verified full companion public key.
+
+        History is retained even with a full or disabled frame queue. The existing
+        `storage.retention.companion_events_days` setting (default 31) expires rows
+        by local receipt time; pending frame messages are preserved. Pre-upgrade
+        rows without a recorded owner remain in the frame queue but are excluded
+        from history. History and deduplication are scoped to the full identity.
+
+        This endpoint covers received messages only. Clients must re-bootstrap
+        after a known database reset; cursors cannot detect restores or retention
+        gaps. Downgrades can expose retained rows to the old frame queue, so back
+        up the database before upgrading. No reverse migration is provided.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 9223372036854775807
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: companion_name
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    description: Received messages, oldest first.
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          description: The cursor. Pass the last one seen as `since`.
+                        sender_key:
+                          type: string
+                          description: |
+                            Sender public key, hex. Empty for a channel message,
+                            whose sender is named inside `text` instead.
+                        sender_prefix:
+                          type: string
+                          description: 4-byte author pubkey prefix, hex; empty when absent.
+                        txt_type:
+                          type: integer
+                        timestamp:
+                          type: integer
+                          description: The sender's clock, seconds. Not monotonic here.
+                        received_at:
+                          type: number
+                          description: |
+                            Local receipt time, epoch seconds. This is what
+                            retention expires on, and the only trustworthy order.
+                        text:
+                          type: string
+                        is_channel:
+                          type: boolean
+                        channel_idx:
+                          type: integer
+                        path_len:
+                          type: integer
+                        snr:
+                          type: number
+                        rssi:
+                          type: integer
+                        channel_data_type:
+                          type: integer
+                        channel_data_payload:
+                          type: string
+                          description: Binary channel payload, hex; empty when absent.
+
   /companion/import_repeater_contacts:
     post:
       tags: [System]

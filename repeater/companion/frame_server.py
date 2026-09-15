@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from dataclasses import replace
 from typing import Callable, Optional
 
 from openhop_core.companion.constants import RESP_CODE_NO_MORE_MESSAGES
@@ -100,12 +101,27 @@ class CompanionFrameServer(_BaseFrameServer):
     # Persistence hook overrides
     # -----------------------------------------------------------------
 
+    # Core persists only what the in-memory queue accepted (``if event.queued``),
+    # and that guard is the only difference here: history must keep what the
+    # queue rejected too. So flip the flag and let core build the row, rather
+    # than holding a second copy of its dict construction that has to be updated
+    # by hand whenever core adds a field. A rejected event carries
+    # ``queue_entry=None``, which the persist hook and ``_remove_queue_entry``
+    # already tolerate.
+    async def _on_message_event(self, event):
+        await super()._on_message_event(replace(event, queued=True))
+
+    async def _on_channel_message_event(self, event):
+        await super()._on_channel_message_event(replace(event, queued=True))
+
+    async def _on_channel_data_event(self, event):
+        await super()._on_channel_data_event(replace(event, queued=True))
+
     async def _persist_companion_message(self, msg_dict: dict, queue_entry=None) -> None:
         """Persist message to SQLite and remove it from the bridge queue.
 
-        The bridge's ``offline_queue_size`` (``message_queue.max_size``) doubles
-        as the SQLite retention limit: 0 disables offline storage entirely, so the
-        message is dropped instead of persisted.
+        The bridge's offline queue limit controls frame delivery only.
+        History is retained even when that queue is full or disabled.
 
         ``queue_entry`` is the exact in-memory entry this message came from.  The
         persisted entry is removed by identity (``message_queue.remove``) rather
@@ -117,46 +133,43 @@ class CompanionFrameServer(_BaseFrameServer):
         if not self.sqlite_handler:
             return
         # Older cores predate the public max_size property.
-        retention = getattr(
+        queue_limit = getattr(
             self.bridge.message_queue,
             "max_size",
             getattr(self.bridge.message_queue, "_max_size", None),
         )
-        if retention == 0:
-            self._remove_queue_entry(queue_entry)
-            return
         persisted = await asyncio.to_thread(
             self.sqlite_handler.companion_push_message,
             self.companion_hash,
-            msg_dict,
-            retention,
+            {**msg_dict, "companion_public_key": self.bridge.get_public_key()},
+            queue_limit,
         )
         if persisted:
             self._remove_queue_entry(queue_entry)
         else:
+            # Three cases reach here and the bool cannot tell them apart: a
+            # duplicate, a storage failure, and a full queue that kept the
+            # message as history only. All three mean the same thing to us.
             logger.debug(
-                "Companion %s: retaining message in memory after SQLite queue rejection",
+                "Companion %s: keeping the in-memory copy; the frame queue did not take this message",
                 self.companion_hash,
             )
 
     def _remove_queue_entry(self, queue_entry) -> None:
         """Remove exactly the persisted entry from the bridge queue by identity.
 
-        Falling back to ``pop_last`` when ``queue_entry`` is None would reopen the
-        interleaving race (it could evict a newer, unpersisted entry), so an event
-        from an older core that carries no entry is left in memory: a possible
-        duplicate is preferable to losing a message.
+        ``None`` means the queue never held this message — it was full or
+        disabled — so there is nothing to remove and history is its only copy.
+        That is now an ordinary outcome, not an anomaly worth a line per
+        message. Falling back to ``pop_last`` here would reopen the interleaving
+        race by evicting a newer, still-unpersisted entry.
         """
         if queue_entry is None:
-            logger.debug(
-                "Companion %s: no queue entry on persisted message; leaving in memory",
-                self.companion_hash,
-            )
             return
         self.bridge.message_queue.remove(queue_entry)
 
     def _sync_next_from_persistence(self) -> Optional[QueuedMessage]:
-        """Retrieve next message from SQLite when bridge queue is empty."""
+        """Retrieve the next frame queue message; its history row remains."""
         if not self.sqlite_handler:
             return None
         msg_dict = self.sqlite_handler.companion_pop_message(self.companion_hash)

@@ -366,6 +366,58 @@ class CompanionAPIEndpoints:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     @require_auth
+    def messages(self, **kwargs):
+        """GET /api/companion/messages?since=<id>&limit=<n> — received message history.
+
+        Oldest first, ``id`` ascending; pass the last ``id`` seen as ``since``
+        to read only what is new. Rows a frame client has consumed are included,
+        so every client reads the same mailbox.
+        """
+        bridge = self._get_bridge(**self._resolve_bridge_params(kwargs))
+        sqlite_handler = self._get_sqlite_handler()
+        try:
+            since = int(kwargs.get("since", 0))
+            limit = int(kwargs.get("limit", 100))
+        except (TypeError, ValueError):
+            raise cherrypy.HTTPError(400, "since and limit must be integers")
+        # SQLite integers are 64-bit; a cursor past that is a bad request, not
+        # a storage failure, and must not surface as a 503.
+        if not 0 <= since <= 2**63 - 1 or limit < 1:
+            raise cherrypy.HTTPError(400, "since must be a 64-bit integer >= 0 and limit >= 1")
+        limit = min(limit, 500)
+        public_key = bridge.get_public_key()
+        rows = sqlite_handler.companion_load_history(
+            f"0x{public_key[0]:02x}", public_key, since, limit
+        )
+        if rows is None:
+            raise cherrypy.HTTPError(503, "Message history unavailable")
+        items = []
+        for row in rows:
+            sender_key = row.get("sender_key") or b""
+            payload = row.get("channel_data_payload") or b""
+            items.append(
+                {
+                    "id": row["id"],
+                    "sender_key": sender_key.hex() if isinstance(sender_key, bytes) else sender_key,
+                    "txt_type": row.get("txt_type", 0),
+                    "timestamp": row.get("timestamp", 0),
+                    "text": row.get("text", ""),
+                    "is_channel": bool(row.get("is_channel")),
+                    "channel_idx": row.get("channel_idx", 0),
+                    "path_len": row.get("path_len", 0),
+                    "sender_prefix": row.get("sender_prefix") or "",
+                    "snr": float(row.get("snr") or 0.0),
+                    "rssi": int(row.get("rssi") or 0),
+                    "channel_data_type": int(row.get("channel_data_type") or 0),
+                    "channel_data_payload": payload.hex() if isinstance(payload, bytes) else "",
+                    "received_at": row.get("created_at", 0),
+                }
+            )
+        return self._success(items)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @require_auth
     def import_repeater_contacts(self, **kwargs):
         """POST /api/companion/import_repeater_contacts  {companion_name, contact_types?, hours?, limit?}
 
