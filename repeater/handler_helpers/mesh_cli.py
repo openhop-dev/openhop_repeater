@@ -170,6 +170,12 @@ class MeshCLI:
         if command == "help" or command.startswith("help "):
             return self._cmd_help(command)
 
+        # Named physical-radio commands deliberately precede the legacy
+        # get/set parser.  ``radio.local.get`` must select the configured
+        # Fabric endpoint, never pass through to the default endpoint.
+        elif command.startswith("radio."):
+            return self._cmd_named_radio(command)
+
         # System commands
         elif command == "reboot":
             return self._cmd_reboot()
@@ -295,6 +301,15 @@ class MeshCLI:
             "Set:  (use 'help set' for details)",
             "  set <param> <value>",
             "",
+            "Named radios (live only; <id> is radios[].id):",
+            "  radio.<id>.get                         Read primary radio params",
+            "  radio.<id>.set <MHz> <kHz> <sf> <cr>   Set primary radio params",
+            "  radio.<id>.tx [dBm]                    Read/set TX power",
+            "  radio.<id>.radio2 [MHz kHz sf cr mode preamble]",
+            "  radio.<id>.tempradio2 [MHz kHz sf cr minutes mode preamble]",
+            "  radio.<id>.status                      Read available live settings",
+            "  IDs are exact (and may contain dots); named commands do not save YAML.",
+            "",
             "Other:",
             "  neighbors           List neighbors",
             "  neighbor.remove <key>  Remove neighbor by pubkey",
@@ -339,6 +354,18 @@ class MeshCLI:
                 "  set agc.reset.interval <n>  AGC reset (rounded to x4)"
             ),
             "get": "Get commands \u2014 type 'help' to see all 'get' parameters.",
+            "radio": (
+                "Named physical-radio commands use radio.<id>.<command>:\n"
+                "  radio.<id>.get\n"
+                "  radio.<id>.set <freq_mhz> <bw_khz> <sf> <cr>\n"
+                "  radio.<id>.tx [dbm]\n"
+                "  radio.<id>.radio2 [freq_mhz bw_khz sf cr off|rx|rxtx preamble]\n"
+                "  radio.<id>.tempradio2 <freq_mhz> <bw_khz> <sf> <cr> <minutes>\n"
+                "                            [off|rx|rxtx] [preamble]\n"
+                "  radio.<id>.status\n"
+                "  <id> is the exact radios[].id value. These are live modem controls\n"
+                "  and do not persist or change the default radio."
+            ),
             "reboot": "Restart the repeater service via systemd.",
             "advert": "Trigger a self-advertisement flood packet.",
             "clock": "'clock' shows UTC time. 'clock sync' is a no-op (system time used).",
@@ -472,6 +499,428 @@ class MeshCLI:
         role = "room_server" if self.identity_type == "room_server" else "repeater"
         version = self.config.get("version", "13")
         return f"openHop_{role} v{version}"
+
+    # ==================== Named Radio Commands ====================
+
+    def _named_radio_endpoints(self) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        """Return explicitly addressable live radio endpoints.
+
+        A FabricRadio forwards unknown attributes to its default endpoint.  That
+        is useful for legacy callers but unsafe for a command that names a
+        physical radio, so this method only returns the Fabric registry (or an
+        unambiguous single-radio stack).  It deliberately never falls back to
+        the default radio for an unknown id.
+        """
+        daemon = getattr(self.config_manager, "daemon", None)
+        if daemon is None:
+            return None, "Error: Radio runtime is not available"
+
+        root = getattr(daemon, "radio", None)
+        if root is None:
+            return None, "Error: Radio runtime is not available"
+
+        fabric = getattr(root, "fabric", None)
+        radios = getattr(fabric, "radios", None)
+        if hasattr(radios, "items"):
+            endpoints = {str(radio_id): radio for radio_id, radio in radios.items()}
+            if endpoints:
+                return endpoints, None
+
+        meta = getattr(daemon, "radio_stack_meta", {})
+        radio_ids = meta.get("radio_ids") if isinstance(meta, dict) else None
+        if isinstance(radio_ids, list) and len(radio_ids) == 1:
+            return {str(radio_ids[0]): root}, None
+
+        return None, "Error: No named radios are available"
+
+    def _resolve_named_radio(
+        self, selector: str
+    ) -> tuple[Optional[str], Optional[Any], Optional[str], Optional[str]]:
+        """Resolve ``radio.<id>.<command>`` using the longest exact id match."""
+        endpoints, error = self._named_radio_endpoints()
+        if error:
+            return None, None, None, error
+
+        remainder = selector[len("radio.") :]
+        matches = [radio_id for radio_id in endpoints if remainder.startswith(f"{radio_id}.")]
+        if not matches:
+            available = ", ".join(endpoints)
+            return (
+                None,
+                None,
+                None,
+                f"Error: Unknown radio in '{selector}'. Available: {available}",
+            )
+
+        # Radio IDs may include dots (for example, ``local.link``), so the
+        # first dot is not a safe separator.  Longest-match preserves the
+        # configured id verbatim and makes overlapping ids deterministic.
+        radio_id = max(matches, key=len)
+        action = remainder[len(radio_id) + 1 :]
+        if not action:
+            return None, None, None, "Error: Expected radio.<id>.<command>"
+        return radio_id, endpoints[radio_id], action.lower(), None
+
+    @staticmethod
+    def _parse_named_air_params(
+        values: list[str], *, usage: str
+    ) -> tuple[Optional[tuple[int, int, int, int]], Optional[str]]:
+        """Parse the standard MHz/kHz/SF/CR tuple into modem units."""
+        if len(values) < 4:
+            return None, f"Error: Expected {usage}"
+        try:
+            frequency_mhz = float(values[0])
+            bandwidth_khz = float(values[1])
+            spreading_factor = int(values[2])
+            coding_rate = int(values[3])
+        except ValueError:
+            return None, "Error: Invalid radio parameters"
+
+        if not (
+            150.0 <= frequency_mhz <= 2500.0
+            and 7.0 <= bandwidth_khz <= 500.0
+            and 5 <= spreading_factor <= 12
+            and 5 <= coding_rate <= 8
+        ):
+            return None, "Error: Invalid radio parameters"
+
+        return (
+            int(round(frequency_mhz * 1_000_000)),
+            int(round(bandwidth_khz * 1_000)),
+            spreading_factor,
+            coding_rate,
+        ), None
+
+    @staticmethod
+    def _parse_named_mode(value: str) -> tuple[Optional[int], Optional[str]]:
+        modes = {"off": 0, "rx": 1, "rxtx": 2, "0": 0, "1": 1, "2": 2}
+        mode = modes.get(value.lower())
+        if mode is None:
+            return None, "Error: Mode must be off, rx, or rxtx"
+        return mode, None
+
+    @staticmethod
+    def _format_primary_radio_config(config: dict[str, Any]) -> Optional[str]:
+        """Format a runtime config in the CLI's MHz/kHz convention."""
+        try:
+            frequency = float(config["frequency"]) / 1_000_000
+            bandwidth = float(config["bandwidth"]) / 1_000
+            spreading_factor = int(config["spreading_factor"])
+            coding_rate = int(config["coding_rate"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return f"{frequency:g},{bandwidth:g},{spreading_factor},{coding_rate}"
+
+    @staticmethod
+    def _format_radio2_config(config: dict[str, Any], *, temporary: bool = False) -> Optional[str]:
+        primary = MeshCLI._format_primary_radio_config(config)
+        if primary is None:
+            return None
+        try:
+            mode = {0: "off", 1: "rx", 2: "rxtx"}.get(int(config.get("mode", 2)), "unknown")
+            preamble = int(config.get("preamble_length", 0))
+        except (TypeError, ValueError):
+            return None
+        if temporary:
+            if not config.get("active", mode != "off"):
+                return "off"
+            try:
+                remaining = int(config["remaining_minutes"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            return f"{primary},{mode},{remaining},{preamble}"
+        return f"{primary},{mode},{preamble}"
+
+    def _read_named_primary_config(
+        self, radio_id: str, radio: Any
+    ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        getter = getattr(radio, "get_radio_config", None)
+        if callable(getter):
+            try:
+                config = getter()
+            except Exception as exc:
+                logger.warning("Unable to read primary config from radio %s: %s", radio_id, exc)
+                return None, f"Error: Failed to read radio '{radio_id}'"
+            if isinstance(config, dict):
+                return config, None
+            return None, f"Error: Failed to read radio '{radio_id}'"
+
+        fields = ("frequency", "bandwidth", "spreading_factor", "coding_rate")
+        config = {field: getattr(radio, field, None) for field in fields}
+        if all(value is not None for value in config.values()):
+            return config, None
+        return None, f"Error: Radio '{radio_id}' does not expose primary radio settings"
+
+    def _read_named_tx_power(
+        self, radio_id: str, radio: Any
+    ) -> tuple[Optional[int], Optional[str]]:
+        getter = getattr(radio, "get_tx_power", None)
+        if callable(getter):
+            try:
+                power = getter()
+            except Exception as exc:
+                logger.warning("Unable to read TX power from radio %s: %s", radio_id, exc)
+                return None, f"Error: Failed to read TX power from radio '{radio_id}'"
+            if power is not None:
+                try:
+                    return int(power), None
+                except (TypeError, ValueError):
+                    pass
+
+        power = getattr(radio, "tx_power", None)
+        try:
+            return int(power), None
+        except (TypeError, ValueError):
+            return None, f"Error: Radio '{radio_id}' does not expose TX power"
+
+    def _set_named_primary_config(self, radio_id: str, radio: Any, values: list[str]) -> str:
+        parsed, error = self._parse_named_air_params(values, usage="freq_mhz bw_khz sf cr")
+        if error:
+            return error
+        frequency, bandwidth, spreading_factor, coding_rate = parsed
+
+        configure = getattr(radio, "configure_radio", None)
+        if callable(configure):
+            try:
+                success = configure(frequency, bandwidth, spreading_factor, coding_rate)
+            except Exception as exc:
+                logger.warning("Unable to configure radio %s: %s", radio_id, exc)
+                return f"Error: Failed to configure radio '{radio_id}'"
+            return "OK" if success else f"Error: Failed to configure radio '{radio_id}'"
+
+        setters = (
+            ("set_frequency", frequency),
+            ("set_bandwidth", bandwidth),
+            ("set_spreading_factor", spreading_factor),
+            ("set_coding_rate", coding_rate),
+        )
+        if not all(callable(getattr(radio, name, None)) for name, _ in setters):
+            return f"Error: Radio '{radio_id}' does not support live primary configuration"
+        for name, value in setters:
+            try:
+                if not getattr(radio, name)(value):
+                    return f"Error: Failed to configure radio '{radio_id}'"
+            except Exception as exc:
+                logger.warning("Unable to configure radio %s: %s", radio_id, exc)
+                return f"Error: Failed to configure radio '{radio_id}'"
+        return "OK"
+
+    def _set_named_radio2_config(
+        self, radio_id: str, radio: Any, values: list[str], *, temporary: bool = False
+    ) -> str:
+        action_name = "tempradio2" if temporary else "radio2"
+        method_name = "set_temporary_radio2_config" if temporary else "set_radio2_config"
+        setter = getattr(radio, method_name, None)
+        if not callable(setter):
+            return f"Error: Radio '{radio_id}' does not support {action_name}"
+
+        if temporary and len(values) == 1 and values[0].lower() == "off":
+            try:
+                success = setter(0, 0, 0, 0, 0, mode=0, preamble_length=0)
+            except Exception as exc:
+                logger.warning("Unable to cancel tempradio2 on radio %s: %s", radio_id, exc)
+                return f"Error: Failed to configure {action_name} on radio '{radio_id}'"
+            return (
+                "OK"
+                if success
+                else f"Error: Failed to configure {action_name} on radio '{radio_id}'"
+            )
+
+        suffix = "minutes [mode] [preamble]" if temporary else "mode [preamble]"
+        parsed, error = self._parse_named_air_params(
+            values, usage=f"freq_mhz bw_khz sf cr {suffix}"
+        )
+        if error:
+            return error
+        frequency, bandwidth, spreading_factor, coding_rate = parsed
+
+        if temporary:
+            if len(values) not in (5, 6, 7):
+                return "Error: Expected freq_mhz bw_khz sf cr minutes [mode] [preamble]"
+            if len(values) == 5:
+                mode = 2
+                duration_value = values[4]
+                preamble_value = "0"
+            else:
+                # Keep the common tempradio tuple unchanged: its timeout is
+                # immediately after freq/bw/sf/cr.  Also accept the earlier
+                # mode-before-minutes shape so existing KISS-oriented callers
+                # do not need a flag day.
+                if values[4].lower() in {"off", "rx", "rxtx"}:
+                    mode, error = self._parse_named_mode(values[4])
+                    duration_value = values[5]
+                else:
+                    duration_value = values[4]
+                    mode, error = self._parse_named_mode(values[5])
+                if error:
+                    return error
+                preamble_value = values[6] if len(values) == 7 else "0"
+            try:
+                duration = int(duration_value)
+                preamble = int(preamble_value)
+            except ValueError:
+                return "Error: Invalid tempradio2 duration or preamble"
+            if not (1 <= duration <= 10_080) or not (0 <= preamble <= 65_535):
+                return "Error: Invalid tempradio2 duration or preamble"
+            try:
+                success = setter(
+                    frequency,
+                    bandwidth,
+                    spreading_factor,
+                    coding_rate,
+                    duration,
+                    mode=mode,
+                    preamble_length=preamble,
+                )
+            except Exception as exc:
+                logger.warning("Unable to configure tempradio2 on radio %s: %s", radio_id, exc)
+                return f"Error: Failed to configure {action_name} on radio '{radio_id}'"
+        else:
+            if len(values) not in (4, 5, 6):
+                return "Error: Expected freq_mhz bw_khz sf cr [mode] [preamble]"
+            mode = 2
+            if len(values) >= 5:
+                mode, error = self._parse_named_mode(values[4])
+                if error:
+                    return error
+            try:
+                preamble = int(values[5]) if len(values) == 6 else 0
+            except ValueError:
+                return "Error: Invalid radio2 preamble"
+            if not 0 <= preamble <= 65_535:
+                return "Error: Invalid radio2 preamble"
+            try:
+                success = setter(
+                    frequency,
+                    bandwidth,
+                    spreading_factor,
+                    coding_rate,
+                    mode=mode,
+                    preamble_length=preamble,
+                )
+            except Exception as exc:
+                logger.warning("Unable to configure radio2 on radio %s: %s", radio_id, exc)
+                return f"Error: Failed to configure {action_name} on radio '{radio_id}'"
+
+        return (
+            "OK"
+            if success
+            else f"Error: Failed to configure {action_name} on radio '{radio_id}'"
+        )
+
+    def _get_named_radio2_config(
+        self, radio_id: str, radio: Any, *, temporary: bool = False
+    ) -> str:
+        action_name = "tempradio2" if temporary else "radio2"
+        method_name = "get_temporary_radio2_config" if temporary else "get_radio2_config"
+        getter = getattr(radio, method_name, None)
+        if not callable(getter):
+            return f"Error: Radio '{radio_id}' does not support {action_name}"
+        try:
+            config = getter()
+        except Exception as exc:
+            logger.warning("Unable to read %s from radio %s: %s", action_name, radio_id, exc)
+            return f"Error: Failed to read {action_name} from radio '{radio_id}'"
+        if not isinstance(config, dict):
+            return f"Error: Failed to read {action_name} from radio '{radio_id}'"
+        formatted = self._format_radio2_config(config, temporary=temporary)
+        if formatted is None:
+            return f"Error: Invalid {action_name} response from radio '{radio_id}'"
+        return f"> {formatted}"
+
+    def _cmd_named_radio_status(self, radio_id: str, radio: Any) -> str:
+        """Show the available live settings without treating absent profiles as errors."""
+        primary, error = self._read_named_primary_config(radio_id, radio)
+        if error:
+            return error
+        primary_text = self._format_primary_radio_config(primary)
+        if primary_text is None:
+            return f"Error: Invalid primary response from radio '{radio_id}'"
+
+        lines = [f"radio.{radio_id}", f"primary: {primary_text}"]
+        tx_power, _ = self._read_named_tx_power(radio_id, radio)
+        if tx_power is not None:
+            lines.append(f"tx: {tx_power}")
+
+        for action_name, method_name, temporary in (
+            ("radio2", "get_radio2_config", False),
+            ("tempradio2", "get_temporary_radio2_config", True),
+        ):
+            getter = getattr(radio, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                config = getter()
+            except Exception as exc:
+                logger.debug("Unable to read %s from radio %s: %s", action_name, radio_id, exc)
+                continue
+            if isinstance(config, dict):
+                text = self._format_radio2_config(config, temporary=temporary)
+                if text is not None:
+                    lines.append(f"{action_name}: {text}")
+        return "\n".join(lines)
+
+    def _cmd_named_radio(self, command: str) -> str:
+        """Handle direct ``radio.<configured-id>.<command>`` controls."""
+        selector, _, argument_text = command.partition(" ")
+        radio_id, radio, action, error = self._resolve_named_radio(selector)
+        if error:
+            return error
+        values = argument_text.split()
+
+        if action == "get":
+            if values:
+                return "Error: radio.<id>.get does not take arguments"
+            config, error = self._read_named_primary_config(radio_id, radio)
+            if error:
+                return error
+            formatted = self._format_primary_radio_config(config)
+            if formatted is None:
+                return f"Error: Invalid primary response from radio '{radio_id}'"
+            return f"> {formatted}"
+
+        if action == "set":
+            return self._set_named_primary_config(radio_id, radio, values)
+
+        if action == "tx":
+            if not values:
+                power, error = self._read_named_tx_power(radio_id, radio)
+                return error if error else f"> {power}"
+            if len(values) != 1:
+                return "Error: Expected one TX power value"
+            try:
+                power = int(values[0])
+            except ValueError:
+                return "Error: Invalid TX power"
+            setter = getattr(radio, "set_tx_power", None)
+            if not callable(setter):
+                return f"Error: Radio '{radio_id}' does not support TX power control"
+            try:
+                success = setter(power)
+            except Exception as exc:
+                logger.warning("Unable to set TX power on radio %s: %s", radio_id, exc)
+                return f"Error: Failed to set TX power on radio '{radio_id}'"
+            return "OK" if success else f"Error: Failed to set TX power on radio '{radio_id}'"
+
+        if action == "radio2":
+            if not values:
+                return self._get_named_radio2_config(radio_id, radio)
+            return self._set_named_radio2_config(radio_id, radio, values)
+
+        if action == "tempradio2":
+            if not values:
+                return self._get_named_radio2_config(radio_id, radio, temporary=True)
+            return self._set_named_radio2_config(radio_id, radio, values, temporary=True)
+
+        if action == "status":
+            if values:
+                return "Error: radio.<id>.status does not take arguments"
+            return self._cmd_named_radio_status(radio_id, radio)
+
+        return (
+            f"Error: Unknown radio command '{action}'. "
+            "Use get, set, tx, radio2, tempradio2, or status"
+        )
 
     # ==================== Get Commands ====================
 
