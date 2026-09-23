@@ -337,6 +337,35 @@ class StorageCollector:
                 return
 
             node_name = self.config.get("repeater", {}).get("node_name", "Unknown")
+
+            # Only publish a record for a packet we actually heard on the air.
+            #
+            # A packet_record with no RF measurement was never received. It is either a packet
+            # this node originated or relayed, or internal traffic between the repeater and a
+            # companion -- they share one process and one radio. The MC2MQTT schema has no way
+            # to express "not measured", so these went out with RSSI "0", which aggregators read
+            # as 0 dBm: a stronger signal than any LoRa link can carry. `direction` still says
+            # "rx", so downstream there is nothing to distinguish them from a real reception.
+            #
+            # The visible damage is on the map rather than in the logs. Whichever node sent the
+            # packet appears to be sitting next to the observer, and because a node's own packet
+            # carries no path, it lands at zero hops -- an apparent direct decode. That is the
+            # evidence people use to judge a link, rank an observer or site a repeater.
+            #
+            # The test is both-zero, not either-zero: a genuine reception can report exactly
+            # 0.0 dB SNR, but never together with exactly 0 dBm RSSI.
+            measured = not (
+                float(packet_record.get("rssi") or 0) == 0.0
+                and float(packet_record.get("snr") or 0) == 0.0
+            )
+
+            if not measured:
+                logger.debug(
+                    f"Skipped mqtt publish of type 0x{packet_type:02X}: no RF measurement, "
+                    "so this packet was not received over the air"
+                )
+                return
+
             packet = PacketRecord.from_packet_record(
                 packet_record, origin=node_name, origin_id=self.mqtt_handler.public_key
             )
