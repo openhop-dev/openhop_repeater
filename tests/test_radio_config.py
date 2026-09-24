@@ -281,5 +281,53 @@ def test_get_radio_for_board_kiss_omits_unset_tuning(monkeypatch):
 
     rc = captured["kwargs"]["radio_config"]
     # Unset keys must not be forwarded, so the wrapper keeps its own defaults.
-    for key in ("kiss_persistence", "kiss_slottime_ms", "tx_delay_ms", "kiss_full_duplex"):
+    for key in (
+        "kiss_persistence",
+        "kiss_slottime_ms",
+        "tx_delay_ms",
+        "kiss_full_duplex",
+        "agc_reset_interval_seconds",
+        "fem_rx_gain",
+        "fem_tx_gain",
+        "rx_boosted_gain",
+    ):
         assert key not in rc
+
+
+def test_get_radio_for_board_kiss_forwards_agc_and_fem(monkeypatch):
+    captured = _kiss_capture_radio_config(monkeypatch)
+
+    board_config = {
+        "radio_type": "kiss",
+        "kiss": {
+            "port": "/dev/ttyACM0",
+            "agc_reset_interval_seconds": 4,
+            "fem_rx_gain": True,
+            "fem_tx_gain": False,
+            "rx_boosted_gain": False,
+        },
+        "repeater": {"agc_reset_interval": 60},  # legacy key loses to canonical
+        "radio": _modem_radio_cfg(),
+    }
+
+    get_radio_for_board(board_config)
+
+    rc = captured["kwargs"]["radio_config"]
+    assert rc["agc_reset_interval_seconds"] == 4
+    assert rc["fem_rx_gain"] is True
+    assert rc["fem_tx_gain"] is False
+    assert rc["rx_boosted_gain"] is False
+
+
+def test_kiss_hardware_config_legacy_agc_fallback_and_bounds():
+    from repeater.config import kiss_hardware_config
+
+    assert kiss_hardware_config({"repeater": {"agc_reset_interval": 8}}) == {
+        "agc_reset_interval_seconds": 8
+    }
+    assert kiss_hardware_config({"kiss": {"agc_reset_interval_seconds": 9999}}) == {
+        "agc_reset_interval_seconds": 1020
+    }
+    # A bad value is dropped rather than stopping the radio from being built.
+    assert kiss_hardware_config({"kiss": {"agc_reset_interval_seconds": "soon"}}) == {}
+    assert kiss_hardware_config({"kiss": {"port": "/dev/x"}}) == {}

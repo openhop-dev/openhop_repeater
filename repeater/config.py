@@ -456,6 +456,39 @@ def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
     return key
 
 
+KISS_AGC_RESET_MAX_SEC = 1020
+
+
+def kiss_hardware_config(board_config: dict) -> Dict[str, Any]:
+    """Optional KISS modem front-end settings for one radio's board config.
+
+    Returns only the keys the operator set, so an absent key leaves the
+    firmware/board default alone. ``kiss.agc_reset_interval_seconds`` is
+    canonical; ``repeater.agc_reset_interval`` (where the setting used to live,
+    unapplied) is honoured as a fallback for configs written before the move.
+    """
+    kiss_cfg = board_config.get("kiss")
+    kiss_cfg = kiss_cfg if isinstance(kiss_cfg, dict) else {}
+    options: Dict[str, Any] = {}
+
+    agc = kiss_cfg.get("agc_reset_interval_seconds")
+    if agc is None:
+        repeater_cfg = board_config.get("repeater")
+        if isinstance(repeater_cfg, dict):
+            agc = repeater_cfg.get("agc_reset_interval")
+    if agc is not None:
+        try:
+            options["agc_reset_interval_seconds"] = max(0, min(KISS_AGC_RESET_MAX_SEC, int(agc)))
+        except (TypeError, ValueError):
+            # Front-end tuning must never stop the radio from being built.
+            logger.warning("Ignoring invalid AGC reset interval %r", agc)
+
+    for key in ("fem_rx_gain", "fem_tx_gain", "rx_boosted_gain"):
+        if kiss_cfg.get(key) is not None:
+            options[key] = bool(kiss_cfg[key])
+    return options
+
+
 def get_radio_for_board(board_config: dict):
     board_config = normalize_modem_config(board_config)
 
@@ -654,6 +687,9 @@ def get_radio_for_board(board_config: dict):
                 radio_config[_key] = int(kiss_config[_key])
         if kiss_config.get("kiss_full_duplex") is not None:
             radio_config["kiss_full_duplex"] = bool(kiss_config["kiss_full_duplex"])
+        # AGC reset interval / FEM gain: the wrapper probes modem capabilities, applies
+        # what the board supports after radio setup, and re-applies on reconnect.
+        radio_config.update(kiss_hardware_config(board_config))
 
         radio = KissModemWrapper(
             port=port,

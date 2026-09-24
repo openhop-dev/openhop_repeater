@@ -577,6 +577,17 @@ radio:
 #   tx_delay_ms: 50              # key-up delay; LoRa needs ~none. Firmware default 500.
 #   # kiss_txtail_ms: 0          # tail after TX (rarely needed)
 #   # kiss_full_duplex: false    # disable carrier-sense/CSMA entirely (not recommended)
+#   # Optional RF front-end controls (MeshCore KISS firmware v2+). Omit to keep the
+#   # firmware/board default. The modem reports which controls its board supports;
+#   # anything unsupported is logged and skipped. Re-applied after every reconnect.
+#   # Mesh CLI: agc.reset.interval, radio.fem.rxgain, radio.fem.txgain, radio.rxgain
+#   # (default radio only).
+#   # agc_reset_interval_seconds: 32  # 0-1020, 4 s steps, 0 = off. Firmware default 32.
+#   #                                 # Replaces repeater.agc_reset_interval (still read).
+#   # fem_rx_gain: true           # external LNA, on boards that expose it
+#   # fem_tx_gain: false          # external PA high-gain, on boards that expose it
+#   # rx_boosted_gain: true       # radio chip's own boosted RX gain (SX126x/LR11x0/LR2021);
+#   #                             # separate from fem_rx_gain. Default: the firmware build's.
 
 # openHop Modem over Wi-Fi/Ethernet TCP (when radio_type: modem_tcp).
 # Requires openhop-core with the TCPLoRaRadio driver

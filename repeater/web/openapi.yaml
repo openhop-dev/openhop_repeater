@@ -816,6 +816,74 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
 
+  /radio_frontend:
+    get:
+      tags: [System]
+      summary: Get KISS modem RF front-end controls
+      description: >
+        AGC reset interval, external FEM gain and radio chip boosted RX gain of the
+        default radio, read from the
+        modem. Only KISS modems running MeshCore KISS firmware v2 or later report
+        support; the controls a board supports come from the board itself.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Front-end status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/RadioFrontendStatus'
+    post:
+      tags: [System]
+      summary: Set KISS modem RF front-end controls
+      description: >
+        Applies the given settings to the default radio's modem and persists only the
+        values it confirms. Takes effect immediately; no restart is needed. Omitted
+        fields are left unchanged.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RadioFrontendSettings'
+            examples:
+              agc:
+                value:
+                  agc_reset_interval_seconds: 4
+              fem:
+                value:
+                  fem_rx_gain: true
+      responses:
+        '200':
+          description: >
+            Settings applied. On partial failure success is false, error names each
+            setting that was not applied, and data still carries the current status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                  error:
+                    type: string
+                  restart_required:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/RadioFrontendApplyResult'
+
   /update_duty_cycle_config:
     post:
       tags: [System]
@@ -5540,6 +5608,68 @@ components:
           type: string
         description:
           type: string
+    RadioFrontendSettings:
+      type: object
+      properties:
+        agc_reset_interval_seconds:
+          type: integer
+          minimum: 0
+          maximum: 1020
+          description: Periodic AGC reset in seconds, 4 s resolution (rounded down), 0 = off
+        fem_rx_gain:
+          type: boolean
+          description: External FEM RX (LNA) gain
+        fem_tx_gain:
+          type: boolean
+          description: External FEM TX (PA) high gain
+        rx_boosted_gain:
+          type: boolean
+          description: >
+            The radio chip's own boosted RX gain (MeshCore radio.rxgain), separate
+            from the external FEM RX gain
+
+    RadioFrontendStatus:
+      type: object
+      required: [available, supports, running, configured]
+      properties:
+        available:
+          type: boolean
+          description: Default radio is a KISS modem with front-end controls
+        supports:
+          type: object
+          required: [agc_reset_interval_seconds, fem_rx_gain, fem_tx_gain, rx_boosted_gain]
+          properties:
+            agc_reset_interval_seconds:
+              type: boolean
+            fem_rx_gain:
+              type: boolean
+            fem_tx_gain:
+              type: boolean
+            rx_boosted_gain:
+              type: boolean
+        running:
+          allOf:
+            - $ref: '#/components/schemas/RadioFrontendSettings'
+          description: Values the modem reports now
+        configured:
+          allOf:
+            - $ref: '#/components/schemas/RadioFrontendSettings'
+          description: Values the config asks for; an absent key keeps the board default
+
+    RadioFrontendApplyResult:
+      allOf:
+        - $ref: '#/components/schemas/RadioFrontendStatus'
+        - type: object
+          required: [applied, errors]
+          properties:
+            applied:
+              $ref: '#/components/schemas/RadioFrontendSettings'
+            errors:
+              type: object
+              additionalProperties:
+                type: string
+              description: Reason per setting that was not applied; "save" for a failed config save
+
     SuccessResponse:
       type: object
       properties:

@@ -2121,6 +2121,65 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in(force=False)
+    def radio_frontend(self):
+        """KISS modem RF front-end controls of the default radio.
+
+        AGC reset interval, external FEM gain, and the radio chip's boosted RX gain.
+
+        GET  /api/radio_frontend -> capabilities, running and configured values
+        POST /api/radio_frontend {"agc_reset_interval_seconds": 0-1020,
+                                  "fem_rx_gain": bool, "fem_tx_gain": bool,
+                                  "rx_boosted_gain": bool}
+
+        POST applies to the modem first and persists only what it confirms; no
+        restart is needed.
+        """
+        self._set_cors_headers()
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            if cherrypy.request.method == "GET":
+                return self._success(self.config_manager.kiss_frontend_status())
+            self._require_post()
+
+            data = cherrypy.request.json or {}
+            if not isinstance(data, dict):
+                return self._error("Request body must be a JSON object")
+            updates = {}
+            if "agc_reset_interval_seconds" in data:
+                agc = data["agc_reset_interval_seconds"]
+                if isinstance(agc, bool) or not isinstance(agc, int) or not 0 <= agc <= 1020:
+                    return self._error("agc_reset_interval_seconds must be an integer 0-1020")
+                updates["agc_reset_interval_seconds"] = agc
+            for key in ("fem_rx_gain", "fem_tx_gain", "rx_boosted_gain"):
+                if key in data:
+                    if not isinstance(data[key], bool):
+                        return self._error(f"{key} must be true or false")
+                    updates[key] = data[key]
+            if not updates:
+                return self._error("No valid settings provided")
+
+            result = self.config_manager.apply_kiss_frontend(updates)
+            status = self.config_manager.kiss_frontend_status()
+            if result["errors"]:
+                detail = ", ".join(f"{k}: {v}" for k, v in result["errors"].items())
+                return {
+                    "success": False,
+                    "error": f"Some settings were not applied ({detail})",
+                    "data": {**status, **result},
+                }
+            return self._success({**status, **result}, restart_required=False)
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Radio front-end error: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
     @cherrypy.tools.json_in()
     def update_duty_cycle_config(self):
         self._set_cors_headers()

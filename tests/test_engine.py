@@ -2658,6 +2658,46 @@ class TestMissedEngineBranches:
         assert handler._crc_error_baselines[None] == 9
 
     @pytest.mark.asyncio
+    async def test_record_crc_errors_polls_a_modem_counter_first(self, handler):
+        """A KISS modem's count is only current after a GetStats poll."""
+
+        class KissLike:
+            def __init__(self):
+                self.crc_error_count = 2
+                self.polls = 0
+
+            def refresh_crc_error_count(self):
+                self.polls += 1
+                self.crc_error_count = 7
+                return self.crc_error_count
+
+        radio = KissLike()
+        handler.dispatcher.radio = radio
+        handler._crc_error_baselines[None] = 2
+
+        await handler._record_crc_errors_async()
+
+        assert radio.polls == 1
+        handler.storage.record_crc_errors.assert_called_once_with(5, None, publish=True)
+        assert handler._crc_error_baselines[None] == 7
+
+    @pytest.mark.asyncio
+    async def test_record_crc_errors_skips_a_radio_whose_poll_fails(self, handler):
+        class Broken:
+            crc_error_count = 9
+
+            def refresh_crc_error_count(self):
+                raise RuntimeError("serial gone")
+
+        handler.dispatcher.radio = Broken()
+        handler._crc_error_baselines[None] = 4
+
+        await handler._record_crc_errors_async()
+
+        handler.storage.record_crc_errors.assert_not_called()
+        assert handler._crc_error_baselines[None] == 4
+
+    @pytest.mark.asyncio
     async def test_record_noise_floor_async_caches_and_persists(self, handler):
         with patch.object(handler, "get_noise_floor", return_value=-117.5):
             await handler._record_noise_floor_async()

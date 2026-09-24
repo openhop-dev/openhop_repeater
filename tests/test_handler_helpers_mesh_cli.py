@@ -44,6 +44,72 @@ def _base_config():
     }
 
 
+class FakeKissRadio:
+    """Just the KissModemWrapper AGC/FEM surface the CLI uses."""
+
+    def __init__(self, caps=("agc", "rx", "tx", "boost"), responsive=True):
+        self.caps = set(caps)
+        self.responsive = responsive
+        self.boosted = True
+        self.agc = 32
+        self.fem = {"rx_gain": False, "tx_gain": False}
+        self.radio_config = {}
+
+    def supports_agc_reset_control(self):
+        return "agc" in self.caps
+
+    def supports_fem_rx_gain(self):
+        return "rx" in self.caps
+
+    def supports_fem_tx_gain(self):
+        return "tx" in self.caps
+
+    def supports_rx_boosted_gain(self):
+        return "boost" in self.caps
+
+    def get_rx_boosted_gain(self):
+        return self.boosted if self.responsive else None
+
+    def set_rx_boosted_gain(self, enabled):
+        if not self.responsive:
+            return None
+        self.boosted = enabled
+        return self.boosted
+
+    def get_agc_reset_interval(self):
+        return self.agc if self.responsive else None
+
+    def set_agc_reset_interval(self, seconds):
+        if not self.responsive:
+            return None
+        self.agc = seconds - seconds % 4
+        self.radio_config["agc_reset_interval_seconds"] = self.agc
+        return self.agc
+
+    def get_fem_state(self):
+        if not self.responsive:
+            return None
+        return {
+            "rx_gain": self.fem["rx_gain"] if "rx" in self.caps else None,
+            "tx_gain": self.fem["tx_gain"] if "tx" in self.caps else None,
+        }
+
+    def set_fem_state(self, rx_gain=None, tx_gain=None):
+        if not self.responsive:
+            return None
+        for key, value in (("rx_gain", rx_gain), ("tx_gain", tx_gain)):
+            if value is not None:
+                self.fem[key] = value
+                self.radio_config[f"fem_{key}"] = value
+        return self.get_fem_state()
+
+    def set_fem_rx_gain(self, enabled):
+        return self.set_fem_state(rx_gain=enabled) is not None
+
+    def set_fem_tx_gain(self, enabled):
+        return self.set_fem_state(tx_gain=enabled) is not None
+
+
 def _cfg_mgr(save_ok=True):
     return SimpleNamespace(
         save_to_file=MagicMock(return_value=save_ok),
@@ -235,7 +301,6 @@ def test_cmd_set_updates_and_validation_errors():
     assert cli._cmd_set("direct.txdelay -1") == "Error, must be 0-2"
     assert cli._cmd_set("direct.txdelay 2.5") == "Error, must be 0-2"
 
-    assert cli._cmd_set("agc.reset.interval 10") == "OK - interval rounded to 8"
     assert cli._cmd_set("bad") == "Error: Missing value"
     assert cli._cmd_set("tx nope").startswith("Error: invalid value")
     assert cli._cmd_set("unknown.key 1") == "unknown config: unknown.key"
@@ -656,6 +721,7 @@ def test_cli_set_commands_persist_with_real_config_manager(tmp_path):
     config_path = tmp_path / "config.yaml"
     cfg = _base_config()
     manager = ConfigManager(config_path=str(config_path), config=cfg, daemon_instance=None)
+    manager.daemon = SimpleNamespace(radio=FakeKissRadio())  # no .config: no live update
     cli = MeshCLI(str(config_path), cfg, manager)
 
     commands = [
@@ -701,3 +767,148 @@ def test_cli_set_commands_persist_with_real_config_manager(tmp_path):
     assert saved["delays"]["rx_delay_base"] == 4.5
     assert saved["delays"]["tx_delay_factor"] == 1.5
     assert saved["delays"]["direct_tx_delay_factor"] == 0.25
+    assert saved["kiss"]["agc_reset_interval_seconds"] == 8
+    assert "agc_reset_interval" not in saved["repeater"]
+
+
+def _kiss_cli(radio, cfg=None, save_ok=True):
+    from repeater.config_manager import ConfigManager
+
+    cfg = cfg if cfg is not None else _base_config()
+    mgr = ConfigManager("/tmp/cfg.yaml", cfg, SimpleNamespace(radio=radio))
+    mgr.save_to_file = MagicMock(return_value=save_ok)
+    mgr.live_update_daemon = MagicMock()
+    return MeshCLI("/tmp/cfg.yaml", cfg, mgr), cfg, mgr
+
+
+def test_agc_get_reads_the_running_modem_not_config():
+    radio = FakeKissRadio()
+    cli, cfg, _ = _kiss_cli(radio)
+    radio.agc = 12
+    assert cli._cmd_get("agc.reset.interval") == "> 12"
+
+
+def test_agc_set_applies_then_persists_effective_value():
+    radio = FakeKissRadio()
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_set("agc.reset.interval 10") == "OK - interval rounded to 8"
+    assert radio.agc == 8
+    assert cfg["kiss"]["agc_reset_interval_seconds"] == 8
+    assert "agc_reset_interval" not in cfg["repeater"]  # legacy key migrated
+    mgr.save_to_file.assert_called_once()
+    mgr.live_update_daemon.assert_not_called()  # already applied to hardware
+
+
+def test_agc_set_clamps_like_firmware():
+    radio = FakeKissRadio()
+    cli, cfg, _ = _kiss_cli(radio)
+    assert cli._cmd_set("agc.reset.interval 5000") == "OK - interval rounded to 1020"
+    assert cli._cmd_set("agc.reset.interval 0") == "OK - interval rounded to 0"
+
+
+def test_agc_set_failure_persists_nothing():
+    radio = FakeKissRadio(responsive=False)
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_set("agc.reset.interval 4") == "Error: radio did not apply setting"
+    assert "kiss" not in cfg
+    assert cfg["repeater"]["agc_reset_interval"] == 8
+    mgr.save_to_file.assert_not_called()
+
+
+def test_agc_unsupported_on_non_kiss_or_old_firmware():
+    for radio in (object(), FakeKissRadio(caps=())):
+        cli, cfg, mgr = _kiss_cli(radio)
+        assert cli._cmd_get("agc.reset.interval") == "Error: unsupported"
+        assert cli._cmd_set("agc.reset.interval 4") == "Error: unsupported"
+        mgr.save_to_file.assert_not_called()
+
+    cli = MeshCLI("/tmp/cfg.yaml", _base_config(), _cfg_mgr())  # manager without a radio
+    assert cli._cmd_get("agc.reset.interval") == "Error: unsupported"
+
+
+def test_fem_get_and_set_round_trip():
+    radio = FakeKissRadio()
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_get("radio.fem.rxgain") == "> off"
+    assert cli._cmd_set("radio.fem.rxgain on") == "OK"
+    assert cli._cmd_get("radio.fem.rxgain") == "> on"
+    assert cli._cmd_set("radio.fem.txgain on") == "OK"
+    assert cli._cmd_set("radio.fem.txgain off") == "OK"
+    assert cfg["kiss"] == {"fem_rx_gain": True, "fem_tx_gain": False}
+    assert radio.fem == {"rx_gain": True, "tx_gain": False}
+
+
+def test_fem_partial_capability_board():
+    """An RX-only board (e.g. Heltec LNA) answers unsupported for TX only."""
+    radio = FakeKissRadio(caps=("agc", "rx"))
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_get("radio.fem.rxgain") == "> off"
+    assert cli._cmd_get("radio.fem.txgain") == "Error: unsupported"
+    assert cli._cmd_set("radio.fem.txgain on") == "Error: unsupported"
+    assert "fem_tx_gain" not in cfg.get("kiss", {})
+
+
+def test_fem_set_rejects_bad_value_and_failed_apply():
+    radio = FakeKissRadio()
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_set("radio.fem.rxgain maybe") == "Error: must be on or off"
+    radio.responsive = False
+    assert cli._cmd_set("radio.fem.rxgain on") == "Error: radio did not apply setting"
+    assert cli._cmd_get("radio.fem.rxgain") == "Error: no response from radio"
+    mgr.save_to_file.assert_not_called()
+
+
+def test_failed_save_rolls_back_in_memory_config():
+    radio = FakeKissRadio()
+    cli, cfg, mgr = _kiss_cli(radio, save_ok=False)
+
+    assert cli._cmd_set("agc.reset.interval 4") == (
+        "Error: applied to radio but failed to save config"
+    )
+    assert radio.agc == 4  # the modem did change
+    assert "kiss" not in cfg
+    assert cfg["repeater"]["agc_reset_interval"] == 8  # legacy value restored
+
+    assert cli._cmd_set("radio.fem.rxgain on") == (
+        "Error: applied to radio but failed to save config"
+    )
+    assert "kiss" not in cfg
+
+    # A later unrelated save must not carry the unsaved hardware setting.
+    mgr.save_to_file.return_value = True
+    assert cli._cmd_set("int.thresh -110") == "OK"
+    assert "kiss" not in cfg
+
+
+def test_failed_save_keeps_existing_kiss_section_intact():
+    radio = FakeKissRadio()
+    cfg = _base_config()
+    cfg["kiss"] = {"port": "/dev/ttyACM0", "fem_rx_gain": False}
+    cli, cfg, _ = _kiss_cli(radio, cfg=cfg, save_ok=False)
+    cli._cmd_set("radio.fem.rxgain on")
+    assert cfg["kiss"] == {"port": "/dev/ttyACM0", "fem_rx_gain": False}
+
+
+def test_rxgain_get_and_set():
+    radio = FakeKissRadio()
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_get("radio.rxgain") == "> on"
+    assert cli._cmd_set("radio.rxgain off") == "OK"
+    assert radio.boosted is False
+    assert cfg["kiss"]["rx_boosted_gain"] is False
+    assert cli._cmd_get("radio.rxgain") == "> off"
+    # Separate from the external LNA
+    assert radio.fem["rx_gain"] is False
+
+
+def test_rxgain_unsupported_and_failures():
+    cli, cfg, mgr = _kiss_cli(FakeKissRadio(caps=("agc", "rx")))
+    assert cli._cmd_get("radio.rxgain") == "Error: unsupported"
+    assert cli._cmd_set("radio.rxgain on") == "Error: unsupported"
+
+    radio = FakeKissRadio(responsive=False)
+    cli, cfg, mgr = _kiss_cli(radio)
+    assert cli._cmd_set("radio.rxgain maybe") == "Error: must be on or off"
+    assert cli._cmd_set("radio.rxgain off") == "Error: radio did not apply setting"
+    assert cli._cmd_get("radio.rxgain") == "Error: no response from radio"
+    mgr.save_to_file.assert_not_called()
