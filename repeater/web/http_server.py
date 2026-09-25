@@ -562,6 +562,7 @@ class HTTPStatsServer:
         self.config = config or {}
         self.config_path = config_path
         self.daemon_instance = daemon_instance
+        self.event_loop = event_loop
 
         # Initialize authentication handlers
         self._init_auth_handlers()
@@ -735,7 +736,7 @@ class HTTPStatsServer:
 
                     # Companion frame proxy (binary WS ↔ TCP byte pipe)
                     if self.daemon_instance:
-                        _set_companion_daemon(self.daemon_instance)
+                        _set_companion_daemon(self.daemon_instance, loop=self.event_loop)
                         config["/ws/companion_frame"] = {
                             "tools.websocket.on": True,
                             "tools.websocket.handler_cls": CompanionFrameWebSocket,
