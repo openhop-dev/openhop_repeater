@@ -13,7 +13,7 @@ import logging
 import shutil
 from typing import Callable, Optional
 
-from openhop_core.companion.constants import RESP_CODE_NO_MORE_MESSAGES
+from openhop_core.companion.constants import MAX_PAYLOAD_SIZE, RESP_CODE_NO_MORE_MESSAGES
 from openhop_core.companion.frame_server import CompanionFrameServer as _BaseFrameServer
 from openhop_core.companion.models import QueuedMessage
 
@@ -58,6 +58,10 @@ class CompanionFrameServer(_BaseFrameServer):
         self.sqlite_handler = sqlite_handler
         self.batt_getter = batt_getter
         self.storage_dir = storage_dir
+        # (client writer, SQLite id) of the message handed to the client by the
+        # last SYNC_NEXT_MESSAGE. It is deleted when that client's next command
+        # arrives; a client that drops first is sent it again.
+        self._pending_delete: Optional[tuple[asyncio.StreamWriter, int]] = None
 
     def _get_batt_and_storage(self) -> tuple[int, int, int]:
         """Report battery millivolts and storage usage to companion clients.
@@ -160,8 +164,10 @@ class CompanionFrameServer(_BaseFrameServer):
         if not self.sqlite_handler:
             return None
         msg_dict = self.sqlite_handler.companion_pop_message(self.companion_hash)
-        if not msg_dict:
-            return None
+        return self._queued_message_from_row(msg_dict) if msg_dict else None
+
+    @staticmethod
+    def _queued_message_from_row(msg_dict: dict) -> QueuedMessage:
         sender_prefix = msg_dict.get("sender_prefix", b"")
         if isinstance(sender_prefix, str):
             sender_prefix = bytes.fromhex(sender_prefix) if sender_prefix else b""
@@ -184,11 +190,50 @@ class CompanionFrameServer(_BaseFrameServer):
     # Non-blocking command overrides (keep event loop responsive)
     # -----------------------------------------------------------------
 
+    async def _handle_cmd(self, payload: bytes) -> None:
+        """Any further command from the client is the receipt for the last synced message."""
+        pending, self._pending_delete = self._pending_delete, None
+        if pending is not None and pending[0] is getattr(self, "_client_writer", None):
+            await asyncio.to_thread(
+                self.sqlite_handler.companion_delete_message, self.companion_hash, pending[1]
+            )
+        await super()._handle_cmd(payload)
+
     async def _cmd_sync_next_message(self, data: bytes) -> None:
-        """Sync next message; run persistence read in thread so SQLite does not block."""
+        """Sync next message; run persistence read in thread so SQLite does not block.
+
+        A persisted message is not removed when it is read. It is removed when
+        the client's next command arrives (:meth:`_handle_cmd`), so a client
+        that drops between the read and the receipt is sent it again.
+        """
         msg = self.bridge.sync_next_message()
-        if msg is None:
-            msg = await asyncio.to_thread(self._sync_next_from_persistence)
+        if msg is None and self.sqlite_handler:
+            writer = getattr(self, "_client_writer", None)
+            row = await asyncio.to_thread(
+                self.sqlite_handler.companion_peek_message, self.companion_hash
+            )
+            if writer is not getattr(self, "_client_writer", None):
+                return  # another client took the slot during the read
+            if row is not None:
+                msg = self._queued_message_from_row(row)
+                frame = self._build_message_frame(msg)
+                if len(frame) > MAX_PAYLOAD_SIZE:
+                    # Undeliverable over frames; drop it as before rather than
+                    # re-serving it forever.
+                    logger.warning(
+                        "Companion %s: dropping message %s (%d bytes exceeds frame size)",
+                        self.companion_hash,
+                        row["id"],
+                        len(frame),
+                    )
+                    await asyncio.to_thread(
+                        self.sqlite_handler.companion_delete_message, self.companion_hash, row["id"]
+                    )
+                    await self._cmd_sync_next_message(data)
+                    return
+                self._pending_delete = (writer, row["id"])
+                self._write_frame(frame)
+                return
         if msg is None:
             self._write_frame(bytes([RESP_CODE_NO_MORE_MESSAGES]))
             return

@@ -110,19 +110,21 @@ def test_bridge_load_prefs_ignores_invalid_or_missing_backend():
 
 @pytest.mark.asyncio
 async def test_frame_server_persistence_paths_and_stop():
+    persisted = {
+        "id": 1,
+        "sender_key": b"k",
+        "txt_type": 1,
+        "timestamp": 2,
+        "text": "hello",
+        "is_channel": True,
+        "channel_idx": 3,
+        "path_len": 1,
+    }
     sqlite = SimpleNamespace(
         companion_push_message=MagicMock(),
-        companion_pop_message=MagicMock(
-            return_value={
-                "sender_key": b"k",
-                "txt_type": 1,
-                "timestamp": 2,
-                "text": "hello",
-                "is_channel": True,
-                "channel_idx": 3,
-                "path_len": 1,
-            }
-        ),
+        companion_delete_message=MagicMock(),
+        companion_pop_message=MagicMock(return_value=persisted),
+        companion_peek_message=MagicMock(return_value=persisted),
         companion_save_contacts=MagicMock(),
         companion_save_channels=MagicMock(),
         companion_upsert_contact=MagicMock(),
@@ -206,13 +208,14 @@ async def test_frame_server_no_more_messages_response_when_empty():
 @pytest.mark.asyncio
 async def test_restart_queue_rows_are_delivered_once_from_sqlite():
     sqlite = SimpleNamespace(
-        companion_pop_message=MagicMock(
+        companion_delete_message=MagicMock(),
+        companion_peek_message=MagicMock(
             side_effect=[
-                {"sender_key": b"a", "timestamp": 1, "text": "first"},
-                {"sender_key": b"b", "timestamp": 2, "text": "second"},
+                {"id": 1, "sender_key": b"a", "timestamp": 1, "text": "first"},
+                {"id": 2, "sender_key": b"b", "timestamp": 2, "text": "second"},
                 None,
             ]
-        )
+        ),
     )
     bridge = SimpleNamespace(sync_next_message=lambda: None)
 
@@ -234,7 +237,7 @@ async def test_restart_queue_rows_are_delivered_once_from_sqlite():
         b"second",
         bytes([RESP_CODE_NO_MORE_MESSAGES]),
     ]
-    assert sqlite.companion_pop_message.call_count == 3
+    assert sqlite.companion_peek_message.call_count == 3
 
 
 @pytest.mark.asyncio
