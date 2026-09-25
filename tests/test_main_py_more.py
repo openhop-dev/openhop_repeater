@@ -29,6 +29,55 @@ def _base_config():
 
 
 @pytest.mark.asyncio
+async def test_remove_companion_stops_only_its_runtime_and_releases_identity():
+    daemon = RepeaterDaemon(_base_config(), radio=object())
+    daemon.identity_manager = IdentityManager({})
+    identity = _FakeLocalIdentity(b"\x10" * 32)
+    other_identity = _FakeLocalIdentity(b"\x20" * 32)
+    daemon.identity_manager.register_identity("deleted", identity, {}, "companion")
+    daemon.identity_manager.register_identity("kept", other_identity, {}, "companion")
+    daemon.identity_manager.register_identity("server", identity, {}, "room_server")
+    bridge = SimpleNamespace(
+        get_public_key=identity.get_public_key, stop=AsyncMock(), note_flood_copy=MagicMock()
+    )
+    other_bridge = SimpleNamespace(stop=AsyncMock())
+    server = SimpleNamespace(bridge=bridge, stop=AsyncMock())
+    other_server = SimpleNamespace(bridge=other_bridge, stop=AsyncMock())
+    daemon.companion_bridges = {0x10: bridge, 0x20: other_bridge}
+    daemon.companion_frame_servers = [server, other_server]
+    daemon.dispatcher = SimpleNamespace(remove_raw_packet_subscriber=MagicMock())
+
+    await daemon.remove_companion(identity.get_public_key().hex())
+
+    server.stop.assert_awaited_once()
+    bridge.stop.assert_awaited_once()
+    other_server.stop.assert_not_awaited()
+    other_bridge.stop.assert_not_awaited()
+    daemon.dispatcher.remove_raw_packet_subscriber.assert_called_once_with(bridge.note_flood_copy)
+    assert daemon.companion_bridges == {0x20: other_bridge}
+    assert daemon.companion_frame_servers == [other_server]
+    assert "deleted" not in daemon.identity_manager.named_identities
+    assert (0x10, "companion") not in daemon.identity_manager.identities
+    assert (0x10, "companion") not in daemon.identity_manager.registered_hashes
+    assert (0x10, "server") in daemon.identity_manager.identities
+    assert daemon.identity_manager.register_identity("replacement", identity, {}, "companion")
+
+
+@pytest.mark.asyncio
+async def test_remove_companion_rejects_a_different_key_with_the_same_prefix():
+    daemon = RepeaterDaemon(_base_config(), radio=object())
+    identity = _FakeLocalIdentity(b"\x10" * 32)
+    bridge = SimpleNamespace(get_public_key=identity.get_public_key, stop=AsyncMock())
+    daemon.companion_bridges = {0x10: bridge}
+
+    with pytest.raises(ValueError, match="public key does not match"):
+        await daemon.remove_companion((b"\x10" + b"X" * 31).hex())
+
+    bridge.stop.assert_not_awaited()
+    assert daemon.companion_bridges == {0x10: bridge}
+
+
+@pytest.mark.asyncio
 async def test_load_additional_identities_valid_and_invalid_entries():
     cfg = _base_config()
     cfg["identities"] = {

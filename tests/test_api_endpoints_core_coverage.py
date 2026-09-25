@@ -31,6 +31,45 @@ def _attach_storage(api, storage):
     api.daemon_instance = SimpleNamespace(repeater_handler=SimpleNamespace(storage=storage))
 
 
+@pytest.mark.parametrize("stop_fails", [False, True])
+@pytest.mark.parametrize("name", ["deleted", ""])
+def test_delete_companion_tears_down_runtime_after_save(cherrypy_ctx, stop_fails, name):
+    request, _ = cherrypy_ctx
+    request.method = "DELETE"
+    api = _make_api({"identities": {"companions": [{"name": name, "identity_key": "11" * 32}]}})
+    remove = AsyncMock(side_effect=RuntimeError("stop failed") if stop_fails else None)
+    api.daemon_instance = SimpleNamespace(remove_companion=remove)
+    api.event_loop = object()
+
+    def submit(coro, loop):
+        api.config_manager.save_to_file.assert_called_once()
+        assert api.config["identities"]["companions"] == []
+        assert loop is api.event_loop
+        return SimpleNamespace(result=lambda timeout: asyncio.run(coro))
+
+    with patch("asyncio.run_coroutine_threadsafe", side_effect=submit):
+        result = api.delete_identity(name=name, lookup_identity_key="11" * 32, type="companion")
+
+    from repeater.companion.identity_resolve import derive_companion_public_key_hex
+
+    remove.assert_awaited_once_with(derive_companion_public_key_hex("11" * 32))
+    assert result["success"] is True
+    assert ("Restart required" in result["message"]) is stop_fails
+
+
+def test_delete_companion_does_not_stop_runtime_when_save_fails(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "DELETE"
+    api = _make_api(
+        {"identities": {"companions": [{"name": "deleted", "identity_key": "11" * 32}]}}
+    )
+    api.config_manager.save_to_file.return_value = False
+    api.daemon_instance = SimpleNamespace(remove_companion=AsyncMock())
+    api.event_loop = object()
+    assert api.delete_identity(name="deleted", type="companion")["success"] is False
+    api.daemon_instance.remove_companion.assert_not_called()
+
+
 class _FakeDiscoveryHelper:
     def __init__(self):
         self.cleanup_called = False
@@ -2838,7 +2877,7 @@ def test_identity_endpoints_paths(cherrypy_ctx):
     api.daemon_instance = SimpleNamespace(identity_manager=id_mgr)
     d2 = api.delete_identity(name="comp1", type="companion")
     assert d2["success"] is True
-    assert "comp1" not in id_mgr.named_identities
+    assert "Restart required" in d2["message"]
     assert response.status in (200, 405)
 
 

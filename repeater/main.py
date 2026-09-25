@@ -1137,6 +1137,34 @@ class RepeaterDaemon:
             channel_count,
         )
 
+    async def remove_companion(self, public_key: str) -> None:
+        """Stop a companion's runtime without deleting its persisted contacts or messages."""
+        key = bytes.fromhex(public_key)
+        companion_hash = key[0]
+        bridge = self.companion_bridges.get(companion_hash)
+        if bridge:
+            if bridge.get_public_key() != key:
+                raise ValueError("Companion bridge public key does not match")
+            for server in list(self.companion_frame_servers):
+                if server.bridge is bridge:
+                    await server.stop()
+                    self.companion_frame_servers.remove(server)
+            if self.dispatcher:
+                self.dispatcher.remove_raw_packet_subscriber(bridge.note_flood_copy)
+            await bridge.stop()
+            del self.companion_bridges[companion_hash]
+
+        if self.identity_manager:
+            manager = self.identity_manager
+            for name, (identity, _cfg, identity_type) in list(manager.named_identities.items()):
+                if identity_type == "companion" and identity.get_public_key() == key:
+                    del manager.named_identities[name]
+            slot = (companion_hash, "companion")
+            registered = manager.identities.get(slot)
+            if registered and registered[0].get_public_key() == key:
+                manager.identities.pop(slot)
+                manager.registered_hashes.pop(slot, None)
+
     async def add_companion_from_config(self, comp_config: dict) -> None:
         """
         Load a single companion from config and register it (hot-reload).

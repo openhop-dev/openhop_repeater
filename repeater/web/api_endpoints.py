@@ -6937,19 +6937,31 @@ class APIEndpoints:
                 if err:
                     return self._error(err)
                 resolved_name = str(companions[idx].get("name") or "").strip()
-                companions.pop(idx)
+                removed = companions.pop(idx)
                 self.config["identities"]["companions"] = companions
                 saved = self.config_manager.save_to_file()
                 if not saved:
                     return self._error("Failed to save configuration to file")
                 logger.info(f"Deleted companion: {resolved_name}")
                 unregister_success = False
-                if self.daemon_instance and hasattr(self.daemon_instance, "identity_manager"):
-                    identity_manager = self.daemon_instance.identity_manager
-                    if resolved_name and resolved_name in identity_manager.named_identities:
-                        del identity_manager.named_identities[resolved_name]
-                        logger.info(f"Removed companion {resolved_name} from named_identities")
+                if self.daemon_instance and self.event_loop:
+                    try:
+                        import asyncio
+
+                        public_key = derive_companion_public_key_hex(removed.get("identity_key"))
+                        if not public_key:
+                            raise ValueError("Cannot resolve deleted companion public key")
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.daemon_instance.remove_companion(public_key), self.event_loop
+                        )
+                        future.result(timeout=15)
                         unregister_success = True
+                    except Exception as comp_error:
+                        logger.warning(
+                            f"Hot reload companion '{resolved_name}' removal failed: {comp_error}. "
+                            "Restart required to fully remove.",
+                            exc_info=True,
+                        )
                 message = (
                     f"Companion '{resolved_name}' deleted successfully and deactivated immediately!"
                     if unregister_success
