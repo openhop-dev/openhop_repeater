@@ -42,6 +42,7 @@ from .auth.middleware import require_auth
 from .auth_endpoints import AuthAPIEndpoints
 from .cad_calibration_engine import CADCalibrationEngine
 from .companion_endpoints import CompanionAPIEndpoints
+from .spectrum_sweep_engine import SpectrumSweepEngine
 from .plugin_endpoints import PluginAPIEndpoints
 from .update_endpoints import UpdateAPIEndpoints
 
@@ -241,6 +242,7 @@ class APIEndpoints:
         self._config_path = config_path or "/etc/openhop_repeater/config.yaml"
 
         self.cad_calibration = CADCalibrationEngine(daemon_instance, event_loop)
+        self.spectrum_sweep = SpectrumSweepEngine(daemon_instance, event_loop)
 
         # Initialize ConfigManager for centralized config management
         from repeater.config_manager import ConfigManager
@@ -5378,6 +5380,85 @@ class APIEndpoints:
         return generate()
 
     cad_calibration_stream._cp_config = {"response.stream": True}
+
+    # ------------------------------------------------------------------
+    # Spectrum sweep: step the radio across a band and stream RSSI dwells
+    # ------------------------------------------------------------------
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def spectrum_sweep_start(self):
+        try:
+            self._require_post()
+            data = cherrypy.request.json or {}
+            started, detail = self.spectrum_sweep.start_sweep(data)
+            if started:
+                return self._success(detail)
+            return self._error(detail)
+        except cherrypy.HTTPError:
+            # Re-raise HTTP errors (like 405 Method Not Allowed) without logging
+            raise
+        except Exception as e:
+            logger.error(f"Error starting spectrum sweep: {e}")
+            return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def spectrum_sweep_stop(self):
+        try:
+            self._require_post()
+            self.spectrum_sweep.stop_sweep()
+            return self._success("Sweep stopped")
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error stopping spectrum sweep: {e}")
+            return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def spectrum_sweep_status(self, radio_id=None):
+        try:
+            return self._success(self.spectrum_sweep.status(radio_id or None))
+        except Exception as e:
+            logger.error(f"Error reading spectrum sweep status: {e}")
+            return self._error(e)
+
+    @cherrypy.expose
+    def spectrum_sweep_stream(self):
+        cherrypy.response.headers["Content-Type"] = "text/event-stream"
+        cherrypy.response.headers["Cache-Control"] = "no-cache"
+        cherrypy.response.headers["Connection"] = "keep-alive"
+
+        engine = self.spectrum_sweep
+
+        def generate():
+            try:
+                yield f"data: {json.dumps({'type': 'connected', 'message': 'Connected to spectrum sweep stream'})}\n\n"
+
+                # A sweep's results are the product, so a client that connects
+                # mid-sweep gets the run from its first message, not from now.
+                last_message_index = 0 if engine.running else len(engine.message_queue)
+                while True:
+                    current_queue_length = len(engine.message_queue)
+                    if current_queue_length < last_message_index:
+                        # A new sweep cleared the queue: a subscriber that stayed
+                        # connected sees the new run from its first message too.
+                        last_message_index = 0
+                    if current_queue_length > last_message_index:
+                        for i in range(last_message_index, current_queue_length):
+                            yield f"data: {json.dumps(engine.message_queue[i])}\n\n"
+                        last_message_index = current_queue_length
+                    else:
+                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    time.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Spectrum sweep SSE stream error: {e}")
+
+        return generate()
+
+    spectrum_sweep_stream._cp_config = {"response.stream": True}
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

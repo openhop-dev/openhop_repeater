@@ -46,6 +46,8 @@ tags:
     description: Noise floor monitoring
   - name: CAD Calibration
     description: Channel Activity Detection calibration
+  - name: Spectrum Sweep
+    description: Band occupancy sweeps on the repeater's own radio
   - name: Adverts
     description: Advertisement and contact management
   - name: Transport Keys
@@ -1969,6 +1971,143 @@ paths:
       tags: [CAD Calibration]
       summary: CAD calibration SSE stream
       description: Server-Sent Events stream of calibration progress
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  # ============================================================================
+  # Spectrum Sweep Endpoints
+  # ============================================================================
+  /spectrum_sweep_start:
+    post:
+      tags: [Spectrum Sweep]
+      summary: Start a spectrum sweep
+      description: |
+        Step the radio across a band, holding each channel in receive for a dwell
+        and collecting every instantaneous RSSI reading. Results are streamed on
+        /spectrum_sweep_stream as raw samples per channel; no statistics are
+        derived on the repeater.
+
+        While the mesh radio sweeps the mesh is off the air. A sweep on that
+        radio is refused unless confirm_mesh_suspend is true. On a multi-radio
+        repeater, radio_id may select a radio other than the default, in which
+        case the mesh keeps running and no confirmation is needed.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_hz:
+                  type: integer
+                  default: 902000000
+                  description: First channel centre, in Hz (inclusive)
+                stop_hz:
+                  type: integer
+                  default: 928000000
+                  description: End of the span, in Hz (exclusive)
+                step_hz:
+                  type: integer
+                  default: 200000
+                  minimum: 1000
+                  description: Channel spacing, in Hz
+                dwell_s:
+                  type: number
+                  default: 0.4
+                  minimum: 0.05
+                  maximum: 5.0
+                  description: Seconds to listen on each channel
+                passes:
+                  type: integer
+                  default: 1
+                  minimum: 1
+                  maximum: 42
+                  description: How many times to cover the span
+                cad_symbols:
+                  type: integer
+                  enum: [1, 2, 4, 8, 16]
+                  description: CAD preamble length; omitted, the radio's own setting
+                cad_count:
+                  type: integer
+                  default: 0
+                  minimum: 0
+                  maximum: 32
+                  description: CADs to run on each channel after its RSSI dwell (0 = none)
+                radio_id:
+                  type: string
+                  description: Radio to sweep with on a multi-radio repeater
+                confirm_mesh_suspend:
+                  type: boolean
+                  default: false
+                  description: Required when the sweep uses the mesh radio
+            examples:
+              us_band_one_pass:
+                value:
+                  start_hz: 902000000
+                  stop_hz: 928000000
+                  step_hz: 200000
+                  dwell_s: 0.4
+                  passes: 1
+                  confirm_mesh_suspend: true
+      responses:
+        '200':
+          description: Sweep started, or refused with a reason
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /spectrum_sweep_stop:
+    post:
+      tags: [Spectrum Sweep]
+      summary: Stop the running sweep
+      description: The sweep ends at the next channel boundary and the mesh frequency is restored.
+      responses:
+        '200':
+          description: Sweep stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /spectrum_sweep_status:
+    get:
+      tags: [Spectrum Sweep]
+      summary: Sweep status and capability
+      description: |
+        Whether a sweep is running, its progress, and whether this repeater can
+        sweep at all (capability.supported) with the reason when it cannot, plus
+        whether a sweep on the given radio would suspend the mesh.
+      parameters:
+        - name: radio_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Describe capability for a specific radio
+      responses:
+        '200':
+          description: Sweep status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /spectrum_sweep_stream:
+    get:
+      tags: [Spectrum Sweep]
+      summary: Spectrum sweep SSE stream
+      description: |
+        Server-Sent Events stream of sweep progress. Message types are
+        connected, status, progress, result, completed, error and keepalive.
+        A result carries freq_hz, dwell_s, started_ts, n, samples (dBm) and
+        discarded for one channel dwell, plus a cad block (symbols, n_cad, hits,
+        longest_run, timeouts, det_peak, det_min, sf, bw_hz) when cad_count was set.
       responses:
         '200':
           description: SSE stream
