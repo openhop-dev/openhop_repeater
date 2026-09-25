@@ -336,7 +336,7 @@ class MeshCLI:
                 "  set direct.txdelay <val>  Direct TX delay (0-2)\n"
                 "  set multi.acks <n>     Multi-ack count\n"
                 "  set int.thresh <dbm>   Interference threshold\n"
-                "  set agc.reset.interval <n>  AGC reset (rounded to x4)"
+                "  set agc.reset.interval <n>  AGC reset (0-1020, rounded to x4)"
             ),
             "get": "Get commands \u2014 type 'help' to see all 'get' parameters.",
             "reboot": "Restart the repeater service via systemd.",
@@ -790,9 +790,8 @@ class MeshCLI:
                 return "OK"
 
             elif key == "agc.reset.interval":
-                interval = int(value)
-                # Round to nearest multiple of 4
-                rounded = (interval // 4) * 4
+                # Clamp to 0-1020 s, then round down to a multiple of 4, as firmware does
+                rounded = min(max(int(value), 0), 1020) // 4 * 4
                 self.repeater_config["agc_reset_interval"] = rounded
                 if not self._save_config_and_apply(["repeater"]):
                     return "Error: Failed to save config"
