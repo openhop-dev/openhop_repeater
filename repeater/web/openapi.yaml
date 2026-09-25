@@ -2091,6 +2091,116 @@ paths:
                   error:
                     type: string
 
+  /trace:
+    post:
+      tags: [Network Policy]
+      summary: Trace an explicit direct multi-hop path
+      description: Send a MeshCore TRACE through the supplied hop hashes. The repeater automatically adds its own hash at both ends. For example, path ["d0"] becomes a closed route [local, "d0", local]. Success requires the final return to the originating repeater, not an overheard intermediate transmission.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: array
+                  minItems: 1
+                  maxItems: 61
+                  description: Ordered hops, for example ["d0"]. The local repeater is added at both ends automatically.
+                  items:
+                    type: string
+                path_hash_mode:
+                  type: integer
+                  enum: [0, 1, 2]
+                  description: TRACE hash-width exponent; 0=1 byte, 1=2 bytes, 2=4 bytes.
+                timeout:
+                  type: integer
+                  minimum: 1
+                  maximum: 120
+                  default: 15
+      responses:
+        '200':
+          description: Trace result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    required: [requested_path, path, rtt_ms, snr_db, rssi, tag, path_hash_mode]
+                    properties:
+                      requested_path:
+                        type: array
+                        items:
+                          type: string
+                      path:
+                        type: array
+                        description: Completed closed route including the origin. Hashes come from the matched TRACE payload, not independently discovered identities.
+                        items:
+                          type: string
+                      path_snrs:
+                        type: array
+                        description: One raw signed-byte SNR encoding per radio link, including final local reception. Values are stored as unsigned bytes; subtract 256 from values above 127, then divide by 4 for dB.
+                        items:
+                          type: integer
+                      rtt_ms:
+                        type: number
+                      snr_db:
+                        type: number
+                      rssi:
+                        type: integer
+                      tag:
+                        type: integer
+                      path_hash_mode:
+                        type: integer
+                  message:
+                    type: string
+                  error:
+                    type: string
+
+  /trace_info:
+    get:
+      tags: [Network Policy]
+      summary: Get local TRACE identity hashes
+      description: Return the local repeater hash for each supported TRACE hash width.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Local TRACE identity information
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    required: [hashes, path_hash_modes]
+                    properties:
+                      hashes:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      path_hash_modes:
+                        type: object
+                        additionalProperties:
+                          type: integer
+                  error:
+                    type: string
+
   /discover_neighbors_start:
     post:
       tags: [Network Policy]

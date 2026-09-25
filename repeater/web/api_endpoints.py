@@ -13,6 +13,7 @@ from typing import Callable, Optional
 import cherrypy
 import yaml
 from openhop_core.protocol import CryptoUtils
+from openhop_core.protocol.constants import MAX_PACKET_PAYLOAD
 
 from repeater import __version__
 from repeater.companion.identity_resolve import (
@@ -135,6 +136,8 @@ POLICY_GROUP_KINDS = {
 # GET    /api/unscoped_flood_policy - Get unscoped flood policy
 # POST   /api/unscoped_flood_policy - Update unscoped flood policy
 # POST   /api/ping_neighbor - Ping a neighbor node
+# POST   /api/trace - Trace an explicit direct multi-hop path
+# GET    /api/trace_info - Return local identity hashes usable by TRACE
 # POST   /api/discover_neighbors_start - Start a live repeater discovery session
 # GET    /api/discover_neighbors_stream?session_id=X - Stream repeater discovery results over SSE
 # POST   /api/add_discovered_neighbor - Persist a discovered node into the neighbors/adverts table
@@ -5910,6 +5913,199 @@ class APIEndpoints:
             raise
         except Exception as e:
             logger.error(f"Error pinging neighbor: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def trace(self):
+        """Send a direct TRACE packet over an explicit multi-hop path."""
+
+        self._set_cors_headers()
+
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            self._require_post()
+            data = cherrypy.request.json or {}
+            raw_path = data.get("path")
+            if not isinstance(raw_path, list) or not raw_path:
+                return self._error("path must be a non-empty array")
+
+            try:
+                timeout = int(data.get("timeout", 15))
+            except (TypeError, ValueError):
+                return self._error("timeout must be an integer")
+            if timeout < 1 or timeout > 120:
+                return self._error("timeout must be between 1 and 120 seconds")
+
+            configured_mode = self.config.get("mesh", {}).get("path_hash_mode", 0)
+            try:
+                path_hash_mode = int(data.get("path_hash_mode", configured_mode))
+            except (TypeError, ValueError):
+                return self._error("path_hash_mode must be 0, 1, or 2")
+            if path_hash_mode not in (0, 1, 2):
+                return self._error("path_hash_mode must be 0, 1, or 2")
+
+            # TRACE flags use MeshCore's exponent encoding: 1, 2, or 4 bytes
+            # per hop for flags 0, 1, or 2. This differs from the ordinary
+            # packet path hash mode, whose mode 2 means three bytes.
+            byte_count = 1 << path_hash_mode
+            max_hops = min(63, (MAX_PACKET_PAYLOAD - 9) // byte_count)
+            if len(raw_path) > max_hops:
+                return self._error(f"path cannot contain more than {max_hops} hops")
+
+            path_values = []
+            max_hash = (1 << (byte_count * 8)) - 1
+            for hop in raw_path:
+                try:
+                    value = int(hop, 16) if isinstance(hop, str) else int(hop)
+                except (TypeError, ValueError):
+                    return self._error(f"Invalid path hop: {hop}")
+                if isinstance(hop, bool) or value < 0 or value > max_hash:
+                    return self._error(f"Each path hop must be a valid {byte_count}-byte hash")
+                path_values.append(value)
+
+            # The API accepts only the remote hops; the local repeater owns
+            # route closure so callers need not know or send their own hash.
+            if not self.daemon_instance or not getattr(
+                self.daemon_instance, "local_identity", None
+            ):
+                return self._error("Local repeater identity not available")
+            public_key = bytes(self.daemon_instance.local_identity.get_public_key())
+            local_hash = int.from_bytes(public_key[:byte_count], "big")
+            # Callers supply route hops; local endpoints are API-owned.
+            # Do not reject or reinterpret values that happen to equal local_hash.
+            if len(path_values) + 2 > max_hops:
+                return self._error(f"closed path cannot contain more than {max_hops} hops")
+            path_values = [local_hash, *path_values, local_hash]
+
+            trace_flags = path_hash_mode
+            # Injection transmits immediately; the origin is not an RF hop.
+            path_bytes = b"".join(value.to_bytes(byte_count, "big") for value in path_values[1:])
+            target_hash = path_values[-1]
+            hex_chars = byte_count * 2
+
+            if not hasattr(self.daemon_instance, "router"):
+                return self._error("Packet router not available")
+            router = self.daemon_instance.router
+            if not hasattr(self.daemon_instance, "trace_helper"):
+                return self._error("Trace helper not available")
+            trace_helper = self.daemon_instance.trace_helper
+
+            trace_tag = secrets.randbits(32)
+            from openhop_core.protocol import PacketBuilder
+
+            packet = PacketBuilder.create_trace(
+                tag=trace_tag,
+                auth_code=0x12345678,
+                flags=trace_flags,
+                path=list(path_bytes),
+            )
+
+            import asyncio
+
+            async def send_and_wait():
+                event = trace_helper.register_trace(trace_tag, path_bytes, trace_flags, timeout)
+                if not await router.inject_packet(packet):
+                    raise RuntimeError("Trace packet could not be transmitted")
+                logger.info(
+                    "Trace sent over %s hops to 0x%0*x (path_hash_mode=%s, tag=%s)",
+                    len(path_values),
+                    hex_chars,
+                    target_hash,
+                    path_hash_mode,
+                    trace_tag,
+                )
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=timeout)
+                    return True
+                except asyncio.TimeoutError:
+                    return False
+
+            try:
+                if self.event_loop is None:
+                    return self._error("Event loop not available")
+                future = asyncio.run_coroutine_threadsafe(send_and_wait(), self.event_loop)
+                response_received = future.result(timeout=timeout + 1)
+            except Exception as e:
+                logger.error("Error waiting for trace response: %s", e)
+                trace_helper.pending_pings.pop(trace_tag, None)
+                return self._error(f"Error waiting for response: {e}")
+
+            if not response_received:
+                trace_helper.pending_pings.pop(trace_tag, None)
+                return self._error(f"Trace timeout after {timeout}s")
+
+            trace_info = trace_helper.pending_pings.pop(trace_tag, None)
+            if not trace_info:
+                return self._error("Trace info not found after response")
+            result = trace_info.get("result")
+            if not result:
+                return self._error("Received trace response but no data")
+
+            if result.get("trace_hops"):
+                grouped_path = [int.from_bytes(bytes(hop), "big") for hop in result["trace_hops"]]
+            else:
+                raw_result_path = result.get("path", [])
+                grouped_path = [
+                    int.from_bytes(bytes(raw_result_path[i : i + byte_count]), "big")
+                    for i in range(0, len(raw_result_path), byte_count)
+                ]
+
+            return self._success(
+                {
+                    "requested_path": [f"0x{value:0{hex_chars}x}" for value in path_values],
+                    "path": [f"0x{value:0{hex_chars}x}" for value in [local_hash, *grouped_path]],
+                    "path_snrs": result.get("path_snrs", []),
+                    "rtt_ms": round(
+                        (result["received_at"] - trace_info["sent_at"]) * 1000,
+                        2,
+                    ),
+                    "snr_db": result["snr"],
+                    "rssi": result["rssi"],
+                    "tag": trace_tag,
+                    "path_hash_mode": path_hash_mode,
+                },
+                message="Trace successful",
+            )
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error("Error tracing path: %s", e, exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def trace_info(self):
+        """Return the local repeater hashes supported by the TRACE endpoint."""
+
+        self._set_cors_headers()
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+        try:
+            if not self.daemon_instance or not getattr(
+                self.daemon_instance, "local_identity", None
+            ):
+                return self._error("Local repeater identity not available")
+            public_key = bytes(self.daemon_instance.local_identity.get_public_key())
+            return self._success(
+                {
+                    "hashes": {
+                        str(
+                            byte_count
+                        ): f"0x{int.from_bytes(public_key[:byte_count], 'big'):0{byte_count * 2}x}"
+                        for byte_count in (1, 2, 4)
+                    },
+                    "path_hash_modes": {"1": 0, "2": 1, "4": 2},
+                }
+            )
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error("Error getting trace info: %s", e, exc_info=True)
             return self._error(str(e))
 
     @cherrypy.expose
