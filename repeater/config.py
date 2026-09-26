@@ -645,6 +645,11 @@ def get_radio_for_board(board_config: dict):
             combined_config["use_gpiod_backend"] = spi_config["use_gpiod_backend"]
         if "radio_timing_delay" in spi_config:
             combined_config["radio_timing_delay"] = float(spi_config["radio_timing_delay"])
+        # LR1121 on the same pins: the chip and the DIO table driving its RF switch
+        if "chip" in spi_config:
+            combined_config["chip"] = str(spi_config["chip"]).lower().strip()
+        if "rf_switch" in spi_config:
+            combined_config["rf_switch"] = _parse_int_list(spi_config["rf_switch"])
 
         # Always construct a fresh instance so multi-radio configs do not
         # share/reuse a singleton SX1262 handle.

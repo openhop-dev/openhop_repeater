@@ -1713,6 +1713,8 @@ class APIEndpoints:
                     config_yaml["radio"]["tx_power"] = hw_config.get("tx_power", 22)
                 if "preamble_length" in hw_config:
                     config_yaml["radio"]["preamble_length"] = hw_config.get("preamble_length", 32)
+                if "cad" in hw_config:
+                    config_yaml["radio"]["cad"] = hw_config.get("cad")
 
                 if "sx1262" not in config_yaml:
                     config_yaml["sx1262"] = {}
@@ -1756,6 +1758,10 @@ class APIEndpoints:
                     config_yaml["sx1262"]["use_gpiod_backend"] = hw_config.get(
                         "use_gpiod_backend", False
                     )
+                if "chip" in hw_config:
+                    config_yaml["sx1262"]["chip"] = hw_config.get("chip", "sx1262")
+                if "rf_switch" in hw_config:
+                    config_yaml["sx1262"]["rf_switch"] = hw_config.get("rf_switch")
             # Explicit setup writes canonical names only.
             config_yaml = normalize_modem_config(config_yaml)
             config_yaml["setup_completed"] = True

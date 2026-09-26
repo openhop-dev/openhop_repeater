@@ -662,6 +662,13 @@ sx1262:
   dio3_tcxo_voltage: 1.8
   use_dio2_rf: false
 
+  # LR1121 on these pins: set chip: lr1121 (use_dio3_tcxo then drives VTCXO) and
+  # its RF switch as SetDioAsRfSwitch bytes: enable, standby, rx, tx, tx_hp, tx_hf,
+  # gnss, wifi (bit 0 = DIO5, bit 1 = DIO6). Values for an Ebyte E80 module below.
+  # LR11xx CAD peaks run about twice the SX126x ones: radio.cad.peak_threshold ~50.
+  # chip: lr1121
+  # rf_switch: [3, 0, 2, 3, 1, 0, 0, 0]
+
   # Waveshare hardware flag
   is_waveshare: false
 
