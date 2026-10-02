@@ -287,6 +287,8 @@ else
     use_dio3_tcxo=$(echo "$hw_config" | jq -r '.use_dio3_tcxo // empty')
     dio3_tcxo_voltage=$(echo "$hw_config" | jq -r '.dio3_tcxo_voltage // empty')
     use_dio2_rf=$(echo "$hw_config" | jq -r '.use_dio2_rf // empty')
+    chip=$(echo "$hw_config" | jq -r '.chip // empty')
+    rf_switch=$(echo "$hw_config" | jq -c '.rf_switch // empty')
 
     # Update radio_type + optional CH341 section
     if [ -n "$radio_type" ]; then
@@ -396,6 +398,11 @@ else
             fi
         fi
     fi
+
+    # LR1121 presets name the chip and its RF switch table; drop both for other boards
+    sed "${SED_OPTS[@]}" '/^  chip:/d; /^  rf_switch:/d' "$CONFIG_FILE"
+    [ -n "$chip" ] && sed "${SED_OPTS[@]}" "/^  rxen_pin:.*/a\\  chip: $chip" "$CONFIG_FILE"
+    [ -n "$rf_switch" ] && sed "${SED_OPTS[@]}" "/^  rxen_pin:.*/a\\  rf_switch: $rf_switch" "$CONFIG_FILE"
 fi
 fi
 
