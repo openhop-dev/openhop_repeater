@@ -889,9 +889,33 @@ def test_evicting_a_stored_entry_deletes_it(db):
     reader, newcomer = LocalIdentity(), LocalIdentity()
     acl = _repeater_acl(db, local, max_clients=1)
     _cli(acl)._cmd_setperm(f"setperm {reader.get_public_key().hex()} 1")
-    _login(acl, newcomer, "", 1)
+    _login(acl, newcomer, "guestpw", 1)
 
     assert _repeater_acl(db, local).load() == 0
+
+
+def test_a_blank_password_newcomer_cannot_evict_a_stored_grant(db):
+    local = LocalIdentity()
+    reader, newcomer = LocalIdentity(), LocalIdentity()
+    acl = _repeater_acl(db, local, max_clients=1)
+    _cli(acl)._cmd_setperm(f"setperm {reader.get_public_key().hex()} 1")
+
+    assert _login(acl, newcomer, "", 1) == (False, 0)
+    assert acl.get_client(reader.get_public_key()) is not None
+    assert _repeater_acl(db, local).load() == 1
+
+
+def test_a_blank_password_newcomer_evicts_a_guest_session_not_a_stored_grant(db):
+    local = LocalIdentity()
+    reader, guest, newcomer = LocalIdentity(), LocalIdentity(), LocalIdentity()
+    acl = _repeater_acl(db, local, max_clients=2)
+    _cli(acl)._cmd_setperm(f"setperm {reader.get_public_key().hex()} 1")
+    assert _login(acl, guest, "", 1)[0] is True
+
+    assert _login(acl, newcomer, "", 2)[0] is True
+    assert acl.get_client(guest.get_public_key()) is None
+    assert acl.get_client(reader.get_public_key()) is not None
+    assert _repeater_acl(db, local).load() == 1
 
 
 def test_a_failed_grant_on_a_full_table_does_not_evict_anyone(db):
@@ -932,6 +956,19 @@ def test_login_helper_loads_the_stored_acl_at_registration(db):
     second.register_identity("repeater", local, identity_type="repeater", config=config)
     reloaded = second.get_acl_for_identity(local.get_public_key()[0])
     assert _login(reloaded, admin, "", 5) == (True, PERM_ACL_ADMIN)
+
+
+def test_a_room_config_without_a_type_still_authenticates_as_a_room(db):
+    """The registered type decides; a room must not fall into the repeater rules."""
+    local, client = LocalIdentity(), LocalIdentity()
+    settings = {"admin_password": "roomadmin", "allow_read_only": False}
+    config = {"name": "room-a", "settings": settings}
+    helper = _login_helper(db)
+    helper.register_identity("room-a", local, identity_type="room_server", config=config)
+    authenticate = helper.handlers[local.get_public_key()[0]].login_handler.authenticate
+
+    assert authenticate(Identity(client.get_public_key()), b"s" * 32, "", 1) == (False, 0)
+    assert "type" not in config
 
 
 def test_re_registering_an_identity_keeps_its_live_sessions(db):

@@ -131,10 +131,11 @@ repeater:
     # Admin password for full access
     admin_password: "admin123"
 
-    # Guest password for limited access
+    # Guest password for limited access. Left empty, a blank password logs
+    # in as a guest, as in firmware.
     guest_password: "guest123"
 
-    # Allow read-only access for clients without password/not in ACL
+    # Allow a blank-password guest login even when guest_password is set
     allow_read_only: false
 
     # JWT secret key for signing tokens (auto-generated if not provided)

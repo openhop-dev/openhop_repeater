@@ -505,7 +505,11 @@ class ACL:
     # ------------------------------------------------------------------
 
     def _put_client(
-        self, identity: Identity, evicted: Optional[list] = None, admin_grant: bool = False
+        self,
+        identity: Identity,
+        evicted: Optional[list] = None,
+        admin_grant: bool = False,
+        keep_grants: bool = False,
     ) -> Optional["ClientInfo"]:
         """Find or add a client, firmware ``putClient``. Call under the lock.
 
@@ -518,6 +522,10 @@ class ACL:
         least recently, by its last login when it has not been active since a
         restart: the stored order is not the order entries were added, so a
         "last slot" would be arbitrary here.
+
+        ``keep_grants`` (a blank-password newcomer, who proved nothing) evicts
+        only entries that are not stored, so anonymous logins cannot churn
+        provisioned grants out of the table; with none to evict it is refused.
 
         Given ``evicted``, the evicted ``(key, client)`` is appended there and
         its stored entry left for the caller to delete once the newcomer is
@@ -534,7 +542,17 @@ class ACL:
             if not self.clients:
                 logger.error(f"ACL for '{self._identity_label}' has max_clients={self.max_clients}")
                 return None
-            candidates = [(k, c) for k, c in self.clients.items() if not c.is_admin()]
+            candidates = [
+                (k, c)
+                for k, c in self.clients.items()
+                if not c.is_admin() and not (keep_grants and self._should_persist(c))
+            ]
+            if keep_grants and not candidates:
+                logger.warning(
+                    f"ACL for '{self._identity_label}' is full of stored grants "
+                    f"(max_clients={self.max_clients}): refused a blank-password newcomer"
+                )
+                return None
             if candidates:
                 evict_key, evict_client = min(candidates, key=lambda kc: kc[1].last_activity)
                 logger.info(f"ACL full, evicted least active client {evict_key[:6].hex()}...")
@@ -806,14 +824,21 @@ class ACL:
             is_new = pub_key not in self.clients
             client = self.clients.get(pub_key)
             if client is None:
-                if not self.allow_read_only:
+                # Firmware simple_repeater compares the blank password with
+                # guest_password, so an empty guest password admits anyone as a
+                # guest. Room servers keep requiring allow_read_only.
+                open_guest = not is_room_server and not guest_pwd
+                if not (self.allow_read_only or open_guest):
                     logger.info("Blank password, sender not in ACL and read-only disabled")
                     return False, 0
-                client = self._put_client(client_identity, evicted)
+                client = self._put_client(client_identity, evicted, keep_grants=True)
                 if client is None:
                     return False, 0
                 client.permissions = PERM_ACL_GUEST
-                logger.info("Blank password, allowing read-only guest access")
+                if self.allow_read_only:
+                    logger.info("Blank password, allowing read-only guest access")
+                else:
+                    logger.info("Blank password, no guest password set: allowing guest access")
             else:
                 # Firmware skips the replay check and the session touch on this
                 # path. We keep both: a replayed blank-password login from a

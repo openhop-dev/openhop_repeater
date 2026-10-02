@@ -190,7 +190,9 @@ class LoginHelper:
                 sync_since=sync_since,
                 target_identity_hash=hash_byte,
                 target_identity_name=name,
-                target_identity_config=config,
+                # The registered type is authoritative: a room config without a
+                # "type" key must not authenticate as a repeater.
+                target_identity_config={**config, "type": identity_type},
             )
             if success and identity_type == "room_server" and self.sqlite_handler is not None:
                 try:
