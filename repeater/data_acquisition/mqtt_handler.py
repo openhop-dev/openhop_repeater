@@ -528,7 +528,13 @@ class _BrokerConnection:
             f"({protocol}://{self.broker['host']}:{self.broker['port']}) ..."
         )
 
-        self.client.connect(self.broker["host"], self.broker["port"], keepalive=self._keepalive)
+        try:
+            self.client.connect(self.broker["host"], self.broker["port"], keepalive=self._keepalive)
+        except Exception as e:
+            # A failure before the handshake never reaches _on_connect; retry it the same way.
+            logger.error(f"Failed to connect to {self.broker['name']}: {e}")
+            self._schedule_reconnect(reason=str(e))
+            return
         self.client.loop_start()
         self._loop_running = True
 

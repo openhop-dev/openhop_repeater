@@ -322,6 +322,29 @@ def test_connect_failure_schedules_reconnect_with_actual_error_reason(monkeypatc
     assert captured["reason"] == "Not authorized (JWT signature/format invalid)"
 
 
+def test_connect_socket_failure_schedules_reconnect(monkeypatch):
+    """A connect that fails before the handshake (DNS or socket down at boot) must retry."""
+    conn = _make_broker_connection("letsmesh")
+    captured = {}
+
+    def fake_schedule_reconnect(reason="connection lost"):
+        captured["reason"] = reason
+
+    def failing_connect(*args, **kwargs):
+        raise OSError("[Errno -3] Temporary failure in name resolution")
+
+    monkeypatch.setattr(conn, "_schedule_reconnect", fake_schedule_reconnect)
+    monkeypatch.setattr(conn.client, "connect", failing_connect)
+    monkeypatch.setattr(
+        conn.client, "loop_start", lambda: captured.setdefault("loop_started", True)
+    )
+
+    conn.connect()
+
+    assert captured["reason"] == "[Errno -3] Temporary failure in name resolution"
+    assert "loop_started" not in captured
+
+
 def test_schedule_reconnect_uses_exponential_backoff_and_cap(monkeypatch):
     conn = _make_broker_connection("letsmesh")
 
