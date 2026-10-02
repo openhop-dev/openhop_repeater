@@ -3193,10 +3193,18 @@ class APIEndpoints:
                     except (ValueError, TypeError):
                         return self._error(f"Broker at index {i} has invalid port")
 
+                    # The only two _BrokerConnection.connect() handles. Some others, such
+                    # as "ws", paho refuses when the client is built, which stops every broker.
+                    transport = str(b.get("transport", "websockets")).strip()
+                    if transport not in ("websockets", "tcp"):
+                        return self._error(
+                            f"Broker at index {i} has invalid transport (websockets or tcp)"
+                        )
+
                     new_broker = {
                         "name": str(b["name"]).strip(),
                         "enabled": b.get("enabled", False),
-                        "transport": str(b.get("transport", "websockets")).strip(),
+                        "transport": transport,
                         "host": str(b["host"]).strip(),
                         "port": port,
                         "format": str(b["format"]).strip(),

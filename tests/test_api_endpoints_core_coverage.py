@@ -2992,6 +2992,11 @@ def test_update_mqtt_config_validation_and_success(cherrypy_ctx):
     assert "invalid port" in api.update_mqtt_config()["error"]
 
     request.json = {
+        "brokers": [{"name": "a", "host": "h", "port": 443, "format": "waev", "transport": "ws"}]
+    }
+    assert "invalid transport" in api.update_mqtt_config()["error"]
+
+    request.json = {
         "iata_code": "SFO",
         "status_interval": 20,
         "brokers": [
