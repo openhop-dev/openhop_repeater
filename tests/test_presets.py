@@ -221,6 +221,14 @@ def test_merge_overrides_by_name_later_wins_documented_rule():
     assert pipeline[0]["host"] == "mqtt.waev.app"
 
 
+def test_merge_overrides_by_name_keeps_tls_keys_the_override_does_not_name():
+    """An override that sets one TLS key must not switch TLS off."""
+    merged = _merge_overrides_by_name(
+        _expand_preset_entries([{"preset": "waev"}]) + [{"name": "Waev", "tls": {"insecure": True}}]
+    )
+    assert merged[0]["tls"] == {"enabled": True, "insecure": True}
+
+
 # --------------------------------------------------------------------
 # MC2MQTT family parity in topic resolution
 # --------------------------------------------------------------------
