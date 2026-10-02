@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -47,6 +48,16 @@ from .update_endpoints import UpdateAPIEndpoints
 
 logger = logging.getLogger("HTTPServer")
 REDACTED_CONFIG_VALUE = "*** REDACTED ***"
+
+
+def _redact_mqtt_broker_passwords(mqtt_brokers):
+    """Copy of an mqtt_brokers section with each broker password replaced by the sentinel."""
+    redacted = copy.deepcopy(mqtt_brokers)
+    for broker in redacted.get("brokers") or []:
+        if isinstance(broker, dict) and broker.get("password"):
+            broker["password"] = REDACTED_CONFIG_VALUE
+    return redacted
+
 
 POLICY_GROUP_KINDS = {
     "channel_hash": "channel_hashes",
@@ -1834,6 +1845,12 @@ class APIEndpoints:
     def stats(self):
         try:
             stats = self.stats_getter() if self.stats_getter else {}
+            if isinstance(stats.get("config", {}).get("mqtt_brokers"), dict):
+                # The engine embeds the live section. Send broker passwords as the
+                # sentinel, which update_mqtt_config turns back into the stored one.
+                stats["config"]["mqtt_brokers"] = _redact_mqtt_broker_passwords(
+                    stats["config"]["mqtt_brokers"]
+                )
             runtime_config = normalize_modem_config(self.config, warn=False)
             redact_modem_tokens_in_place(runtime_config)
             # Include active radio configuration in stats so UI can hydrate
@@ -3170,6 +3187,14 @@ class APIEndpoints:
                     for existing in (self.config.get("mqtt_brokers", {}) or {}).get("brokers", [])
                     if isinstance(existing, dict) and existing.get("name")
                 }
+                # A name two brokers share maps to None, so neither gets the other's.
+                stored_passwords_by_name = {}
+                for existing in (self.config.get("mqtt_brokers", {}) or {}).get("brokers", []):
+                    if isinstance(existing, dict) and existing.get("name"):
+                        name = str(existing.get("name"))
+                        stored_passwords_by_name[name] = (
+                            None if name in stored_passwords_by_name else existing.get("password")
+                        )
 
                 validated = []
                 for i, b in enumerate(brokers):
@@ -3230,7 +3255,13 @@ class APIEndpoints:
                     else:
                         new_broker["use_jwt_auth"] = False
                         new_broker["username"] = b.get("username", None)
-                        new_broker["password"] = b.get("password", None)
+                        password = b.get("password", None)
+                        if password == REDACTED_CONFIG_VALUE:
+                            # /api/stats sends this in place of the stored password.
+                            password = stored_passwords_by_name.get(new_broker["name"])
+                            if not password:
+                                return self._error(f"Broker at index {i}: enter its password again")
+                        new_broker["password"] = password
 
                     validated.append(new_broker)
 
@@ -8333,6 +8364,11 @@ class APIEndpoints:
 
                 redact_modem_tokens_in_place(exported, replacement=REDACTED_CONFIG_VALUE)
 
+                if isinstance(exported.get("mqtt_brokers"), dict):
+                    exported["mqtt_brokers"] = _redact_mqtt_broker_passwords(
+                        exported["mqtt_brokers"]
+                    )
+
                 # Redact identity keys in companion / room_server configs
                 for section in ("room_servers", "companions"):
                     entries = exported.get("identities", {}).get(section, []) or []
@@ -8586,6 +8622,22 @@ class APIEndpoints:
                             if entry.get("identity_key") == "*** REDACTED ***":
                                 existing = cur_by_name.get(entry.get("name"), {})
                                 entry["identity_key"] = existing.get("identity_key", "")
+
+                if section == "mqtt_brokers" and isinstance(value, dict):
+                    # Preserve broker passwords that are redacted
+                    cur_brokers = (self.config.get("mqtt_brokers") or {}).get("brokers") or []
+                    cur_by_name = {}
+                    for b in cur_brokers:
+                        if isinstance(b, dict):
+                            # A name two brokers share restores neither password.
+                            cur_by_name[b.get("name")] = {} if b.get("name") in cur_by_name else b
+                    for broker in value.get("brokers") or []:
+                        if (
+                            isinstance(broker, dict)
+                            and broker.get("password") == REDACTED_CONFIG_VALUE
+                        ):
+                            existing = cur_by_name.get(broker.get("name"), {})
+                            broker["password"] = existing.get("password", "")
 
                 if section == "mqtt" and isinstance(value, dict):
                     # Backward compatibility: treat legacy "mqtt" section as

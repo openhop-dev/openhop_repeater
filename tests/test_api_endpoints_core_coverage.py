@@ -651,6 +651,7 @@ def test_config_export_redacts_secrets_and_identity_keys(cherrypy_ctx):
                 "companions": [{"name": "c1", "identity_key": bytes.fromhex("0102")}],
                 "room_servers": [{"name": "r1", "identity_key": bytes.fromhex("0304")}],
             },
+            "mqtt_brokers": {"brokers": [{"name": "lan", "password": "mqtt-pw"}]},
             "misc": {"blob": b"\x0a\x0b"},
         }
     )
@@ -666,6 +667,7 @@ def test_config_export_redacts_secrets_and_identity_keys(cherrypy_ctx):
     assert "identity_key" not in exported["repeater"]
     assert exported["identities"]["companions"][0]["identity_key"] == "*** REDACTED ***"
     assert exported["misc"]["blob"] == "0a0b"
+    assert exported["mqtt_brokers"]["brokers"][0]["password"] == "*** REDACTED ***"
     assert result["data"]["meta"]["includes_secrets"] is False
 
 
@@ -716,6 +718,18 @@ def test_stats_omits_top_level_and_multi_radio_modem_tokens(cherrypy_ctx):
     assert config["radios"][0]["modem_tcp"]["token"] == "nested-secret"
 
 
+def test_stats_replaces_mqtt_broker_passwords_with_the_sentinel(cherrypy_ctx):
+    del cherrypy_ctx
+    mqtt_brokers = {"brokers": [{"name": "lan", "username": "u", "password": "mqtt-pw"}]}
+    api = _make_api({"mqtt_brokers": mqtt_brokers})
+    api.stats_getter = lambda: {"config": {"mqtt_brokers": mqtt_brokers}}
+
+    result = api.stats()
+
+    assert result["config"]["mqtt_brokers"]["brokers"][0]["password"] == "*** REDACTED ***"
+    assert mqtt_brokers["brokers"][0]["password"] == "mqtt-pw"
+
+
 def test_config_export_canonicalizes_modem_keys_and_redacts_token(cherrypy_ctx):
     request, _ = cherrypy_ctx
     request.method = "GET"
@@ -745,6 +759,26 @@ def test_config_export_canonicalizes_modem_keys_and_redacts_token(cherrypy_ctx):
     assert redacted["radios"][1]["modem_tcp"]["token"] == "*** REDACTED ***"
     assert full["modem_tcp"]["token"] == "tcp-secret"
     assert full["radios"][1]["modem_tcp"]["token"] == "nested-secret"
+
+
+def test_config_import_keeps_mqtt_broker_passwords_the_export_redacted(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.user = {"username": "admin", "auth_type": "jwt"}
+    api = _make_api({"mqtt_brokers": {"brokers": [{"name": "lan", "password": "mqtt-pw"}]}})
+    request.json = {
+        "config": {"mqtt_brokers": {"brokers": [{"name": "lan", "password": "*** REDACTED ***"}]}}
+    }
+
+    assert api.config_import()["success"] is True
+    assert api.config["mqtt_brokers"]["brokers"][0]["password"] == "mqtt-pw"
+
+    api.config["mqtt_brokers"]["brokers"].append({"name": "lan", "password": "other-pw"})
+    request.json = {
+        "config": {"mqtt_brokers": {"brokers": [{"name": "lan", "password": "*** REDACTED ***"}]}}
+    }
+    assert api.config_import()["success"] is True
+    assert api.config["mqtt_brokers"]["brokers"][0]["password"] == ""
 
 
 def test_config_import_rejects_missing_config_object(cherrypy_ctx):
@@ -3017,6 +3051,34 @@ def test_update_mqtt_config_validation_and_success(cherrypy_ctx):
     out2 = api.update_mqtt_config()
     assert out2["success"] is False
     assert "save failed" in out2["error"]
+
+
+def test_update_mqtt_config_keeps_a_password_posted_back_as_the_sentinel(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api({"mqtt_brokers": {"brokers": [{"name": "lan", "password": "mqtt-pw"}]}})
+    api.config_manager.update_and_save.return_value = {"success": True, "saved": True}
+    request.method = "POST"
+    broker = {
+        "name": "lan",
+        "host": "h",
+        "port": 1883,
+        "format": "mqtt",
+        "transport": "tcp",
+        "username": "u",
+        "password": "*** REDACTED ***",
+    }
+
+    request.json = {"brokers": [broker]}
+    assert api.update_mqtt_config()["success"] is True
+    updates = api.config_manager.update_and_save.call_args.kwargs["updates"]["mqtt_brokers"]
+    assert updates["brokers"][0]["password"] == "mqtt-pw"
+
+    request.json = {"brokers": [{**broker, "name": "renamed"}]}
+    assert "password" in api.update_mqtt_config()["error"]
+
+    api.config["mqtt_brokers"]["brokers"].append({"name": "lan", "password": "other-pw"})
+    request.json = {"brokers": [broker]}
+    assert "password" in api.update_mqtt_config()["error"]
 
 
 def test_restart_service_options_method_and_result_paths(cherrypy_ctx):
