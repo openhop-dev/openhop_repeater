@@ -105,18 +105,46 @@ class TraceHelper:
                     )
                     return  # wait for a valid response or let timeout handle it
                 ping_info = self.pending_pings[trace_tag]
-                # Store response data (legacy path list + structured hops)
-                ping_info["result"] = {
-                    "path": legacy_trace_path,
-                    "trace_hops": trace_hops,
-                    "trace_path_bytes": trace_bytes,
-                    "snr": packet.get_snr(),
-                    "rssi": rssi_val,
-                    "received_at": time.time(),
-                }
-                # Signal the waiting coroutine
-                ping_info["event"].set()
-                logger.info(f"Ping response received for tag {trace_tag}")
+                expected = ping_info.get("expected_trace")
+                if expected is not None:
+                    # The final receiver has not appended its SNR yet. Ignore
+                    # overheard intermediate transmissions, but still allow
+                    # normal forwarding when this node occurs mid-route.
+                    complete = (
+                        flags == expected["flags"]
+                        and trace_bytes == expected["path"]
+                        and len(packet.path) == num_hops - 1
+                        and trace_hops[-1] == expected["local_hash"]
+                    )
+                    if complete:
+                        snr_byte = max(-128, min(127, int(packet.get_snr() * 4))) & 0xFF
+                        ping_info["result"] = {
+                            "path": legacy_trace_path,
+                            "trace_hops": trace_hops,
+                            "trace_path_bytes": trace_bytes,
+                            "path_snrs": [*packet.path, snr_byte],
+                            "snr": packet.get_snr(),
+                            "rssi": rssi_val,
+                            "received_at": time.time(),
+                        }
+                        ping_info["event"].set()
+                        # Consume at the originating repeater; do not transmit
+                        # another copy after the closed route has returned.
+                        return
+                else:
+                    # Store response data (legacy path list + structured hops)
+                    ping_info["result"] = {
+                        "path": legacy_trace_path,
+                        "trace_hops": trace_hops,
+                        "trace_path_bytes": trace_bytes,
+                        "path_snrs": list(packet.path),
+                        "snr": packet.get_snr(),
+                        "rssi": rssi_val,
+                        "received_at": time.time(),
+                    }
+                    # Signal the waiting coroutine
+                    ping_info["event"].set()
+                    logger.info(f"Ping response received for tag {trace_tag}")
 
             # Record the trace packet for dashboard/statistics
             if self.repeater_handler:
@@ -407,6 +435,23 @@ class TraceHelper:
 
         logger.info("Trace: not forwarded (internal)")
 
+    def register_trace(self, tag: int, path: bytes, flags: int, timeout: int) -> asyncio.Event:
+        """Wait for a closed route's final RF reception, not an overheard hop."""
+        width = PathUtils.trace_payload_hash_width(flags)
+        local_hash = self._pubkey_prefix(width)
+        if not local_hash and width == 1:
+            local_hash = bytes([self.local_hash & 0xFF])
+        if len(path) < 2 * width or len(path) % width or path[-width:] != local_hash:
+            raise ValueError("Trace wire path must contain a remote hop and end locally")
+        event = self.register_ping(tag, int.from_bytes(local_hash, "big"))
+        self.pending_pings[tag]["expected_trace"] = {
+            "path": bytes(path),
+            "flags": flags,
+            "local_hash": local_hash,
+        }
+        self.pending_pings[tag]["timeout"] = timeout
+        return event
+
     def register_ping(self, tag: int, target_hash: int) -> asyncio.Event:
         """Register a ping request and return an event to wait on.
 
@@ -437,7 +482,7 @@ class TraceHelper:
         stale_tags = [
             tag
             for tag, info in self.pending_pings.items()
-            if current_time - info["sent_at"] > max_age_seconds
+            if current_time - info["sent_at"] > max(max_age_seconds, info.get("timeout", 0) + 1)
         ]
         for tag in stale_tags:
             self.pending_pings.pop(tag)
