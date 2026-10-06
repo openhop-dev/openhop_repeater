@@ -95,6 +95,9 @@ def manager(tmp_path: Path):
         "https://example.test/demo-0.2.0.whl": _make_wheel(
             tmp_path / "w0.2.0.whl", "openhop.demo", "0.2.0"
         ),
+        "https://example.test/demo-0.3.0.whl": _make_wheel(
+            tmp_path / "w0.3.0.whl", "openhop.demo", "0.3.0"
+        ),
         "https://example.test/wrong-id.whl": _make_wheel(
             tmp_path / "wrong.whl", "other.id", "0.1.0"
         ),
@@ -187,6 +190,29 @@ def test_catalogue_install_enables_and_sets_source(manager: PluginManager, tmp_p
             not p.name.startswith("openhop-plugin-download-") or not p.exists()
             for p in download.iterdir()
         )
+
+
+def test_update_keeps_only_current_and_previous_release(manager: PluginManager):
+    manager.install_from_catalogue("openhop.demo")
+    paths = manager.storage.paths_for("openhop.demo")
+    (paths.data_dir / "config.json").write_text("{}", encoding="utf-8")
+    paths.log_file.write_text("log\n", encoding="utf-8")
+
+    for version in ("0.2.0", "0.3.0"):
+        manager._test_state["releases"] = [  # type: ignore[attr-defined]
+            _release(
+                f"v{version}",
+                f"demo-{version}-py3-none-any.whl",
+                f"https://example.test/demo-{version}.whl",
+            )
+        ]
+        manager.github.clear_cache()
+        assert manager.update_plugin("openhop.demo", force_refresh=True)["version"] == version
+
+    assert sorted(p.name for p in paths.releases_dir.iterdir()) == ["0.2.0", "0.3.0"]
+    assert paths.current_link.resolve() == paths.release_dir("0.3.0").resolve()
+    assert (paths.data_dir / "config.json").is_file()
+    assert paths.log_file.is_file()
 
 
 def test_manifest_id_mismatch_rejected(manager: PluginManager):
