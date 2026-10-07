@@ -65,6 +65,12 @@ class TestParseCompanionBridgeKwargs:
         with pytest.raises(ValueError):
             parse_companion_bridge_kwargs({"max_contacts": -1})
 
+    def test_message_history_is_on_only_for_true(self):
+        assert parse_companion_bridge_kwargs({"message_history": True}) == {"message_history": True}
+        assert parse_companion_bridge_kwargs({"message_history": "false"}) == {
+            "message_history": False
+        }
+
 
 class TestCompanionRadioCapabilities:
     def test_reads_active_radio_state_and_known_sx1262_limit(self):

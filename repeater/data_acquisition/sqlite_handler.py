@@ -1686,6 +1686,47 @@ class SQLiteHandler:
                     )
                     logger.info(f"Migration '{migration_name}' applied successfully")
 
+                # Migration 21: received-message history for companions that opt in
+                # (``message_history``). Separate from companion_messages, which is
+                # the frame client's delivery queue and is emptied as it syncs.
+                # Rows belong to the full public key: companion_hash is one byte, so
+                # a replacement identity could otherwise read its predecessor's.
+                # AUTOINCREMENT so an id is never reissued after retention empties
+                # the table, which would hide new rows behind a client's cursor.
+                migration_name = "add_companion_message_history"
+                existing = conn.execute(
+                    "SELECT migration_name FROM migrations WHERE migration_name = ?",
+                    (migration_name,),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS companion_message_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            companion_public_key BLOB NOT NULL,
+                            sender_key BLOB NOT NULL,
+                            txt_type INTEGER NOT NULL DEFAULT 0,
+                            timestamp INTEGER NOT NULL DEFAULT 0,
+                            text TEXT NOT NULL,
+                            is_channel INTEGER NOT NULL DEFAULT 0,
+                            channel_idx INTEGER NOT NULL DEFAULT 0,
+                            path_len INTEGER NOT NULL DEFAULT 0,
+                            sender_prefix TEXT NOT NULL DEFAULT '',
+                            snr REAL,
+                            rssi INTEGER,
+                            channel_data_type INTEGER,
+                            channel_data_payload BLOB,
+                            packet_hash TEXT,
+                            created_at REAL NOT NULL
+                        )
+                        """
+                    )
+                    conn.execute(
+                        "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
+                        (migration_name, time.time()),
+                    )
+                    logger.info(f"Migration '{migration_name}' applied successfully")
+
                 conn.commit()
 
         except Exception as e:
@@ -3936,10 +3977,8 @@ class SQLiteHandler:
         """Prune retention-bounded tables.
 
         ``companion_events_days`` is forwarded from engine.py
-        (``storage.retention.companion_events_days``, default 31). Accepted here
-        so the periodic cleanup call cannot TypeError and silently skip all
-        SQLite pruning. Companion journal/history pruning is layered on by the
-        companion-api storage work once those tables exist.
+        (``storage.retention.companion_events_days``, default 31) and expires
+        companion_message_history by the time the repeater received each message.
         """
         try:
             cutoff = time.time() - (days * 24 * 3600)
@@ -3970,6 +4009,15 @@ class SQLiteHandler:
                 conn.execute("DELETE FROM packet_egress WHERE timestamp < ?", (cutoff,))
 
                 conn.commit()
+
+                # After the commit, so a database that lacks the table cannot cost
+                # the packet pruning above.
+                if companion_events_days is not None:
+                    conn.execute(
+                        "DELETE FROM companion_message_history WHERE created_at < ?",
+                        (time.time() - companion_events_days * 24 * 3600,),
+                    )
+                    conn.commit()
 
                 if (
                     packets_deleted > 0
@@ -5651,4 +5699,65 @@ class SQLiteHandler:
                 return {k: v for k, v in msg.items() if k != "id"}
         except Exception as e:
             logger.error(f"Failed to pop companion message: {e}")
+            return None
+
+    def companion_record_history(self, public_key: bytes, msg: Dict) -> None:
+        """Append a received message to the companion's history, which syncing never removes."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO companion_message_history
+                    (companion_public_key, sender_key, txt_type, timestamp, text,
+                     is_channel, channel_idx, path_len, sender_prefix, snr, rssi,
+                     channel_data_type, channel_data_payload, packet_hash, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        public_key,
+                        msg.get("sender_key", b""),
+                        msg.get("txt_type", 0),
+                        msg.get("timestamp", 0),
+                        msg.get("text", ""),
+                        int(msg.get("is_channel", False)),
+                        msg.get("channel_idx", 0),
+                        msg.get("path_len", 0),
+                        msg.get("sender_prefix", b"").hex(),
+                        float(msg.get("snr") or 0.0),
+                        int(msg.get("rssi") or 0),
+                        int(msg.get("channel_data_type") or 0),
+                        bytes(msg.get("channel_data_payload") or b""),
+                        msg.get("packet_hash") or None,
+                        time.time(),
+                    ),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to record companion message history: {e}")
+
+    def companion_load_history(
+        self, public_key: bytes, since_id: int, limit: int
+    ) -> Optional[List[Dict]]:
+        """Load history after ``since_id``, oldest first (``id`` ascending).
+
+        Returns [] when there is none, or None when the read failed — callers
+        must not treat a failed read as "no messages".
+        """
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT id, sender_key, txt_type, timestamp, text, is_channel, channel_idx,
+                           path_len, sender_prefix, snr, rssi, channel_data_type,
+                           channel_data_payload, packet_hash, created_at AS received_at
+                    FROM companion_message_history
+                    WHERE companion_public_key = ? AND id > ?
+                    ORDER BY id ASC LIMIT ?
+                    """,
+                    (public_key, since_id, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to load companion message history: {e}")
             return None

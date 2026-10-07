@@ -8,6 +8,7 @@ schema evolution when NodePrefs gains or loses fields.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from openhop_core.companion import CompanionBridge
+from openhop_core.companion.models import MessageEvent
 
 from repeater import __version__ as repeater_version
 
@@ -77,10 +79,12 @@ class RepeaterCompanionBridge(CompanionBridge):
         sqlite_handler=None,
         companion_hash: str = "",
         on_prefs_saved: Optional[Callable[[str], None]] = None,
+        message_history: bool = False,
     ) -> None:
         self._sqlite_handler = sqlite_handler
         self._companion_hash = companion_hash
         self._on_prefs_saved = on_prefs_saved
+        self.message_history = message_history
         super().__init__(
             identity=identity,
             packet_injector=packet_injector,
@@ -104,6 +108,37 @@ class RepeaterCompanionBridge(CompanionBridge):
             except Exception as e:
                 # Cosmetic: never let it stop the companion loading.
                 logger.warning("Could not register the repeater version with the CLI: %s", e)
+        if message_history and sqlite_handler:
+            # Subscribed here rather than in the frame server's persistence hook:
+            # core calls that only for a message the offline queue kept, and the
+            # queue keeps none at offline_queue_size 0 or when full of direct ones.
+            self.on_message_event(self._record_history)
+            self.on_channel_message_event(self._record_history)
+            self.on_channel_data_event(self._record_history)
+
+    async def _record_history(self, event) -> None:
+        """Record a MessageEvent, ChannelMessageEvent or ChannelDataEvent.
+
+        A field the event type lacks takes the value the frame queue stores for it.
+        """
+        msg = {
+            "sender_key": getattr(event, "sender_key", b""),
+            "txt_type": getattr(event, "txt_type", 0),
+            "timestamp": getattr(event, "timestamp", 0),
+            "text": getattr(event, "text", ""),
+            "is_channel": not isinstance(event, MessageEvent),
+            "channel_idx": getattr(event, "channel_idx", 0),
+            "path_len": event.path_len,
+            "sender_prefix": getattr(event, "sender_prefix", b""),
+            "snr": event.snr,
+            "rssi": event.rssi,
+            "channel_data_type": getattr(event, "data_type", 0),
+            "channel_data_payload": getattr(event, "payload", b""),
+            "packet_hash": event.packet_hash,
+        }
+        await asyncio.to_thread(
+            self._sqlite_handler.companion_record_history, self.get_public_key(), msg
+        )
 
     def _save_prefs(self) -> None:
         """Persist full NodePrefs as JSON to SQLite."""
