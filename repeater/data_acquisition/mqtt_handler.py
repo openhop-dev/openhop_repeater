@@ -132,8 +132,8 @@ MC2MQTT_FORMATS = ("meshcoretomqtt", "letsmesh", "waev")
 #   Pass 1 - replace every {preset: ...} entry in place with the bundled
 #            broker list. Unknown preset is dropped with a warning.
 #   Pass 2 - walk left-to-right; if an entry's name already appeared
-#            earlier, shallow-merge the LATER entry onto the EARLIER one
-#            and drop the duplicate. Place override entries AFTER preset
+#            earlier, merge the LATER entry onto the EARLIER one (tls key by
+#            key) and drop the duplicate. Place override entries AFTER preset
 #            entries to make them win.
 # --------------------------------------------------------------------
 def _expand_preset_entries(brokers: List[dict]) -> List[dict]:
@@ -164,8 +164,14 @@ def _merge_overrides_by_name(brokers: List[dict]) -> List[dict]:
             continue
         name = entry.get("name")
         if name and name in by_index:
-            # Shallow-merge: later entry's keys overwrite earlier entry's keys.
-            result[by_index[name]] = {**result[by_index[name]], **entry}
+            # Later entry's keys overwrite earlier entry's keys. tls is merged
+            # key by key: replacing it whole with {insecure: true} drops
+            # enabled, and the broker then connects without TLS.
+            earlier = result[by_index[name]]
+            merged = {**earlier, **entry}
+            if isinstance(earlier.get("tls"), dict) and isinstance(entry.get("tls"), dict):
+                merged["tls"] = {**earlier["tls"], **entry["tls"]}
+            result[by_index[name]] = merged
         else:
             if name:
                 by_index[name] = len(result)
