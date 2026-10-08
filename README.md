@@ -219,6 +219,30 @@ sudo ./manage.sh
 sudo systemctl restart openhop-repeater
 ```
 
+### Named Radio Controls
+
+On a multi-radio deployment, target a configured physical radio by its exact
+`radios[].id` value instead of relying on the default radio:
+
+```text
+radio.local.get
+radio.local.set 909.5 62.5 7 5
+radio.local.tx 17
+radio.local.radio2 909.5 62.5 8 5 rxtx 96
+radio.local.tempradio2 909.5 62.5 8 5 60
+```
+
+The form is always `radio.<id>.<command>`. IDs are exact and may contain dots;
+for example, `radio.local.backhaul.get` selects the configured ID
+`local.backhaul`. A mistyped ID returns an error rather than falling back to
+the default radio.
+
+Named commands change the live selected modem only; they do not save YAML or
+change `fabric.default_radio`. `tempradio2` follows the normal temporary-radio
+tuple plus timeout (`freq`, `bw`, `sf`, `cr`, `minutes`) and restores the saved
+`radio2` profile when the modem-side timer expires. The `radio2` and
+`tempradio2` commands require a KISS v2 modem that supports those profiles.
+
 ### Optional pyMC_Glass Integration
 
 openHop Repeater supports an optional `glass` configuration section for
