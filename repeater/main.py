@@ -499,6 +499,11 @@ class RepeaterDaemon:
             self.dispatcher.rx_delay_base = float(
                 self.config.get("delays", {}).get("rx_delay_base", 0.0)
             )
+            # AGC reset interval in seconds (MeshCore "set agc.reset.interval");
+            # 0 disables it, the firmware default.
+            self.dispatcher.agc_reset_interval = int(
+                self.config.get("repeater", {}).get("agc_reset_interval", 0)
+            )
             logger.info("Dispatcher initialized")
             logger.info("Dispatcher dedupe enabled: %s", dedupe_enabled)
 
