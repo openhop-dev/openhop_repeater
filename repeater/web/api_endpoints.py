@@ -28,7 +28,11 @@ from repeater.companion.utils import (
     trim_companion_contacts_to_fit,
     validate_companion_config_capacity,
 )
-from repeater.config import resolve_storage_dir, validate_fabric_config
+from repeater.config import (
+    resolve_storage_dir,
+    validate_duty_cycle_config,
+    validate_fabric_config,
+)
 from repeater.handler_helpers.acl import role_name as acl_role_name
 from repeater.modem_config import (
     LEGACY_MODEM_RADIO_TYPES,
@@ -3594,6 +3598,11 @@ class APIEndpoints:
                     validate_fabric_config(config_yaml)
                 except ValueError as exc:
                     add_error("fabric", str(exc))
+
+                try:
+                    validate_duty_cycle_config(config_yaml)
+                except ValueError as exc:
+                    add_error("duty_cycle", str(exc))
 
             valid = len(errors) == 0
             return self._success(

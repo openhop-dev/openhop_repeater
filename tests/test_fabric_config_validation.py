@@ -288,6 +288,24 @@ fabric:
     assert result["data"]["summary"]["error_count"] == 0
 
 
+def test_validate_config_reports_invalid_duty_cycle_scope(cherrypy_ctx, tmp_path):
+    request, _ = cherrypy_ctx
+    request.method = "GET"
+    api = _make_api()
+    api._config_path = _write_config(
+        tmp_path,
+        """
+duty_cycle:
+  budget_scope: country-default
+""",
+    )
+
+    result = api.validate_config()
+
+    assert result["data"]["valid"] is False
+    assert any(error["path"] == "duty_cycle" for error in result["data"]["errors"])
+
+
 def test_clearing_radios_alone_is_refused_while_fanout_is_still_set(cherrypy_ctx):
     """Dropping to one radio invalidates the fan-out that described two.
 

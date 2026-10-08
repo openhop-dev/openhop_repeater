@@ -696,28 +696,32 @@ duty_cycle:
   # Maximum airtime per minute in milliseconds
   max_airtime_per_minute: 3600
 
-  # MULTI-RADIO NODES (see `radios:` above) read this as a limit PER CHANNEL,
-  # which is what a duty cycle is. Each radio is metered against its own budget
-  # at its own modulation, so a bridge on two frequencies may transmit up to
-  # this much on each of them - more total airtime than the same node allowed
-  # before, and correct, because the two bands are separate allowances. Two
-  # radios tuned to the same frequency and bandwidth share one budget, since
-  # they contend for the same spectrum.
+  # How multi-radio nodes group physical radios into rolling airtime budgets:
+  #   channel  - same effective frequency + bandwidth share (legacy default)
+  #   radio    - one independent budget per physical radio id
+  #   shared   - every radio on the node shares one budget
+  #   explicit - radios share only when assigned the same named budget_group
   #
-  # Bands differ: 868.0-868.6 MHz allows 1% where 869.4-869.65 allows 10%. Give
-  # a radio its own limit by putting a duty_cycle block in its radios[] entry:
+  # The appropriate policy depends on jurisdiction, equipment conformity and
+  # deployment policy. Changing this setting requires a service restart so an
+  # active rolling window is not regrouped while the node is transmitting.
+  budget_scope: channel
+  #
+  # Give a radio its own limit by putting a duty_cycle block in its radios[]
+  # entry. Radios sharing a budget use the strictest configured limit:
   #
   #   radios:
   #     - id: local
   #       duty_cycle:
-  #         max_airtime_per_minute: 600   # 1% band
+  #         max_airtime_per_minute: 600
+  #         budget_group: local-domain    # required for explicit scope
   #     - id: link
   #       duty_cycle:
-  #         max_airtime_per_minute: 6000  # 10% band
+  #         max_airtime_per_minute: 6000
+  #         budget_group: backhaul-domain
   #
-  # To go back to one budget shared across every radio - more conservative than
-  # the regulations require, and what this node did before per-channel metering:
-  # shared_budget: true
+  # Legacy compatibility: shared_budget: true maps to budget_scope: shared when
+  # budget_scope is omitted. Do not configure conflicting old and new values.
 
 # Storage Configuration
 storage:

@@ -19,6 +19,8 @@ from repeater.policy_engine import default_policy_engine_config
 
 logger = logging.getLogger("Config")
 
+DUTY_CYCLE_BUDGET_SCOPES = ("radio", "channel", "shared", "explicit")
+
 
 def _resolve_policy_config_path(config: Dict[str, Any], config_path: str) -> Path:
     policy_section = config.get("policy", {}) if isinstance(config.get("policy"), dict) else {}
@@ -377,6 +379,11 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         config["logging"]["level"] = env_log_level
 
     config = _load_policy_engine_config(config, config_path)
+
+    try:
+        validate_duty_cycle_config(config)
+    except ValueError as exc:
+        raise ConfigurationError(f"Invalid duty_cycle configuration: {exc}") from exc
 
     return config
 
@@ -1178,6 +1185,97 @@ def validate_fabric_config(config: dict) -> tuple:
 
     radio_count = len(radios_cfg) if has_radios else 1
     return _validate_fabric_fanout(fabric_cfg, tx_mode, radio_count)
+
+
+def resolve_duty_cycle_budget_scope(config: dict) -> str:
+    """Return the configured duty-cycle ledger grouping policy.
+
+    ``channel`` is the compatibility default. The legacy ``shared_budget``
+    switch maps onto the new ``shared`` scope when ``budget_scope`` is omitted.
+    When both spellings are present, a legacy ``true`` cannot accompany a
+    non-shared scope. A legacy ``false`` is harmless because the explicit scope
+    is authoritative.
+    """
+    duty_cycle = config.get("duty_cycle")
+    if duty_cycle is None:
+        duty_cycle = {}
+    if not isinstance(duty_cycle, dict):
+        raise ValueError("duty_cycle must be a mapping")
+
+    has_scope = "budget_scope" in duty_cycle
+    scope = str(duty_cycle.get("budget_scope", "") or "").strip().lower()
+    if not has_scope:
+        legacy = duty_cycle.get("shared_budget", False)
+        if not isinstance(legacy, bool):
+            raise ValueError("duty_cycle.shared_budget must be true or false")
+        return "shared" if legacy else "channel"
+
+    if scope not in DUTY_CYCLE_BUDGET_SCOPES:
+        supported = ", ".join(DUTY_CYCLE_BUDGET_SCOPES)
+        raise ValueError(f"duty_cycle.budget_scope must be one of: {supported} (got {scope!r})")
+
+    if "shared_budget" in duty_cycle:
+        legacy = duty_cycle["shared_budget"]
+        if not isinstance(legacy, bool):
+            raise ValueError("duty_cycle.shared_budget must be true or false")
+        if legacy != (scope == "shared"):
+            raise ValueError(
+                "duty_cycle.shared_budget conflicts with duty_cycle.budget_scope; "
+                "remove shared_budget or make both select shared accounting"
+            )
+    return scope
+
+
+def duty_cycle_budget_groups(config: dict) -> dict:
+    """Return non-empty explicit budget groups keyed by configured radio id."""
+    groups = {}
+    radios = config.get("radios")
+    if not isinstance(radios, list):
+        return groups
+    for index, entry in enumerate(radios):
+        if not isinstance(entry, dict):
+            continue
+        radio_id = entry.get("id") or entry.get("radio_id")
+        if not radio_id:
+            continue
+        duty_cycle = entry.get("duty_cycle")
+        group = duty_cycle.get("budget_group") if isinstance(duty_cycle, dict) else None
+        if isinstance(group, str) and group.strip():
+            groups[str(radio_id)] = group.strip()
+        elif group is not None:
+            raise ValueError(f"radios[{index}].duty_cycle.budget_group must be a non-empty string")
+    return groups
+
+
+def validate_duty_cycle_config(config: dict) -> str:
+    """Validate configurable RF Fabric duty-cycle accounting.
+
+    Returns the resolved scope so runtime callers and config validation use the
+    same legacy mapping and explicit-group rules.
+    """
+    scope = resolve_duty_cycle_budget_scope(config)
+    if scope != "explicit":
+        return scope
+
+    radios = config.get("radios")
+    if not isinstance(radios, list) or not radios:
+        raise ValueError("duty_cycle.budget_scope=explicit requires a non-empty radios list")
+
+    groups = duty_cycle_budget_groups(config)
+    for index, entry in enumerate(radios):
+        if not isinstance(entry, dict):
+            continue
+        radio_id = entry.get("id") or entry.get("radio_id")
+        if not radio_id:
+            raise ValueError(
+                f"radios[{index}].id is required when duty_cycle.budget_scope=explicit"
+            )
+        if str(radio_id) not in groups:
+            raise ValueError(
+                f"radios[{index}].duty_cycle.budget_group is required when "
+                "duty_cycle.budget_scope=explicit"
+            )
+    return scope
 
 
 # Air-setting defaults per radio_type, mirroring ``get_radio_for_board``. The
