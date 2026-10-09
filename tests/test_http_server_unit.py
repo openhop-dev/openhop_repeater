@@ -244,3 +244,72 @@ def test_cors_response_headers_allow_bearer_preflight_without_credentials():
     assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
     assert "Authorization" in headers["Access-Control-Allow-Headers"]
     assert "Access-Control-Allow-Credentials" not in headers
+
+
+def _csp_app(monkeypatch, config):
+    fake_api = SimpleNamespace(config_manager=object(), docs=lambda: "d")
+    monkeypatch.setattr(hs, "APIEndpoints", lambda *args, **kwargs: fake_api)
+    monkeypatch.setattr(cherrypy, "request", SimpleNamespace(method="GET"), raising=False)
+    monkeypatch.setattr(cherrypy, "response", SimpleNamespace(headers={}), raising=False)
+    return hs.StatsApp(config=config)
+
+
+def test_bundled_ui_document_carries_default_csp(monkeypatch, tmp_path):
+    (tmp_path / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    app = _csp_app(monkeypatch, config={})
+    # Point the *default* frontend at a temp bundle so the test needs no build.
+    app.default_html_dir = str(tmp_path)
+
+    assert app.index() == "<html>ok</html>"
+    csp = cherrypy.response.headers["Content-Security-Policy"]
+    assert csp == hs.StatsApp._DEFAULT_CONTENT_SECURITY_POLICY
+    directives = dict(part.strip().split(" ", 1) for part in csp.split(";"))
+    # The point of the policy: mesh-supplied text rendered as HTML must not run.
+    assert directives["script-src"] == "'self'"
+    assert "'unsafe-inline'" not in directives["script-src"]
+    assert "'unsafe-eval'" not in directives["script-src"]
+    assert directives["object-src"] == "'none'"
+    assert directives["base-uri"] == "'self'"
+    # What the bundled UI legitimately needs still works.
+    assert "https://fonts.googleapis.com" in directives["style-src"]
+    assert "blob:" in directives["worker-src"]
+    assert "https:" in directives["img-src"]
+    assert "https:" in directives["connect-src"]
+
+    # Client-side routes serve the same document with the same header.
+    cherrypy.response.headers.clear()
+    assert app.default("neighbors") == "<html>ok</html>"
+    assert cherrypy.response.headers["Content-Security-Policy"] == csp
+
+
+def test_custom_web_path_frontend_gets_no_csp_unless_configured(monkeypatch, tmp_path):
+    (tmp_path / "index.html").write_text("<html>custom</html>", encoding="utf-8")
+
+    app = _csp_app(monkeypatch, config={"web": {"web_path": str(tmp_path)}})
+    assert app.index() == "<html>custom</html>"
+    assert "Content-Security-Policy" not in cherrypy.response.headers
+
+    policy = "default-src 'self'; script-src 'self' 'unsafe-inline'"
+    app = _csp_app(
+        monkeypatch,
+        config={"web": {"web_path": str(tmp_path), "content_security_policy": policy}},
+    )
+    assert app.index() == "<html>custom</html>"
+    assert cherrypy.response.headers["Content-Security-Policy"] == policy
+
+
+def test_csp_config_overrides_and_disables(monkeypatch, tmp_path):
+    (tmp_path / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+
+    app = _csp_app(
+        monkeypatch, config={"web": {"content_security_policy": "  script-src 'self'  "}}
+    )
+    app.default_html_dir = str(tmp_path)
+    app.index()
+    assert cherrypy.response.headers["Content-Security-Policy"] == "script-src 'self'"
+
+    for disabled in (False, "", "   "):
+        app = _csp_app(monkeypatch, config={"web": {"content_security_policy": disabled}})
+        app.default_html_dir = str(tmp_path)
+        app.index()
+        assert "Content-Security-Policy" not in cherrypy.response.headers, repr(disabled)
