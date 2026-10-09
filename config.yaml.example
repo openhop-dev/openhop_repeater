@@ -817,3 +817,12 @@ web:
   # If not specified, uses the default built-in path
   # Example: /opt/custom-web-ui or /home/user/my-frontend
   # web_path: null
+
+  # Content-Security-Policy sent with the dashboard page (optional).
+  # The built-in frontend ships with a default policy that only lets scripts
+  # from the repeater itself run, so text received over the mesh (node names
+  # and the like) can never execute in an operator's browser even if a UI bug
+  # renders it as HTML. Leave unset to keep that default. Set a string to use
+  # your own policy, or false to send no header. A custom web_path frontend
+  # receives no header unless one is set here.
+  # content_security_policy: "default-src 'self'; script-src 'self'; ..."

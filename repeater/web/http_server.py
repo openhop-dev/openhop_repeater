@@ -355,6 +355,33 @@ class StatsApp:
 
     _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
     _REVALIDATE_CACHE = "no-cache"
+
+    # Content Security Policy for the bundled single-page app.
+    #
+    # Node names, contact types and other strings shown in the dashboard arrive
+    # in packets that anyone with a radio can send. If one of them is ever
+    # rendered as HTML by mistake, this policy stops the injected markup from
+    # running script: only scripts served from this origin may execute, and
+    # inline <script> and on* handlers are refused. The rest of the policy
+    # permits what the bundled UI needs: Google Fonts, map tiles and vector
+    # styles from HTTPS tile servers, MapLibre's blob: web worker, and inline
+    # style attributes used by Leaflet popups and Plotly.
+    _DEFAULT_CONTENT_SECURITY_POLICY = "; ".join(
+        (
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+            "font-src 'self' data: https:",
+            "img-src 'self' data: blob: https:",
+            "connect-src 'self' https: wss: ws:",
+            "worker-src 'self' blob:",
+            "child-src 'self' blob:",
+            "object-src 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+            "frame-ancestors 'self'",
+        )
+    )
     # Vite names hashed files ``name-XXXXXXXX.ext``; a hash carries an uppercase letter or a
     # digit, which a plain two-word name such as ``red-btn-down.svg`` does not.
     _HASHED_NAME = re.compile(r"-([A-Za-z0-9_-]{8})\.[A-Za-z0-9]+$")
@@ -476,6 +503,28 @@ class StatsApp:
         self._resolve_html_dir()
         return self._serve_static_file(self.html_dir, ("favicon.ico",))
 
+    def _content_security_policy(self) -> Optional[str]:
+        """Return the CSP header value for the app document, or None to send none.
+
+        ``web.content_security_policy`` in config.yaml selects the policy:
+        unset uses the built-in default for the bundled UI; a string replaces it
+        (for a custom frontend with different needs); ``false`` disables the
+        header. A custom ``web.web_path`` frontend gets no header unless one is
+        configured, since its needs are unknown and a wrong policy would break it.
+        """
+        web_cfg = self.config.get("web", {}) if isinstance(self.config, dict) else {}
+        if not isinstance(web_cfg, dict):
+            web_cfg = {}
+        policy = web_cfg.get("content_security_policy")
+        if policy is False:
+            return None
+        if isinstance(policy, str):
+            policy = policy.strip()
+            return policy or None
+        if self.html_dir != self.default_html_dir:
+            return None
+        return self._DEFAULT_CONTENT_SECURITY_POLICY
+
     @cherrypy.expose
     def index(self, **kwargs):
         """Serve the Vue.js application index.html."""
@@ -483,6 +532,9 @@ class StatsApp:
         index_path = os.path.join(self.html_dir, "index.html")
         try:
             cherrypy.response.headers["Cache-Control"] = self._REVALIDATE_CACHE
+            csp = self._content_security_policy()
+            if csp:
+                cherrypy.response.headers["Content-Security-Policy"] = csp
             with open(index_path, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
