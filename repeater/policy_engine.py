@@ -69,6 +69,8 @@ class PolicyEngine:
     def evaluate(self, packet, context: dict) -> PolicyDecision:
         if not self.enabled:
             return PolicyDecision(action="allow", matched=False, reason="policy_disabled")
+        # Only keep decrypt results for this call: id() values are reused once a packet is freed.
+        self._channel_decrypt_cache.clear()
 
         for rule in self.rules:
             if not isinstance(rule, dict):
