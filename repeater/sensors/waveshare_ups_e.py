@@ -57,7 +57,7 @@ class WaveshareUpsESensor(SensorBase):
             "key": "bus_number",
             "type": "integer",
             "label": "I2C Bus Number",
-            "default": 0,
+            "default": 1,
             "help": "Linux I2C bus number",
         },
         {
@@ -141,7 +141,7 @@ class WaveshareUpsESensor(SensorBase):
             batt_voltage_mv = _u16le(bd, 0)
             batt_current_ma = _u16le(bd, 2)
             if batt_current_ma > 0x7FFF:  # signed 16-bit
-                batt_current_ma -= 0xFFFF
+                batt_current_ma -= 0x10000
             batt_percent = _u16le(bd, 4)
             remaining_mah = _u16le(bd, 6)
             time_remaining = _u16le(bd, 8)
