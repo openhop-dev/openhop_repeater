@@ -1,10 +1,13 @@
 """
 WebSocket proxy for the companion frame protocol.
 
-Bridges browser WebSocket to the companion TCP frame server.
-Raw byte pipe — no parsing, all protocol logic lives in the client.
+Bridges a browser WebSocket to the companion frame server: in-process over a
+socketpair when the frame server offers ``attach()``, otherwise by dialling
+its TCP listener. Raw byte pipe — no parsing, all protocol logic lives in the
+client.
 """
 
+import asyncio
 import logging
 import socket
 import threading
@@ -17,11 +20,15 @@ logger = logging.getLogger("CompanionWSProxy")
 
 # Set by http_server.py before CherryPy starts
 _daemon = None
+# The daemon's asyncio loop, where the frame servers live. The WS handler runs
+# on a CherryPy thread, so attaching in-process crosses into this loop.
+_loop = None
 
 
-def set_daemon(instance):
-    global _daemon
+def set_daemon(instance, loop=None):
+    global _daemon, _loop
     _daemon = instance
+    _loop = loop
 
 
 class CompanionFrameWebSocket(WebSocket):
@@ -80,27 +87,52 @@ class CompanionFrameWebSocket(WebSocket):
             self.close(code=1008, reason="missing companion_name")
             return
 
-        # Resolve companion TCP port + bind address from config
-        resolved = self._resolve_tcp_endpoint(companion_name)
-        if resolved is None:
-            logger.warning(f"Connection rejected: companion '{companion_name}' not found")
-            self.close(code=1008, reason="companion not found")
-            return
+        # Preferred: hand the frame server one end of a socketpair and keep the
+        # other as our "TCP" socket. No listener, bind address or port is
+        # involved, so a companion whose listener failed to bind is still
+        # reachable from here. Everything after this block is unchanged: the
+        # pump thread and received_message() only ever see a socket.
+        frame_server = self._resolve_frame_server(companion_name)
+        attached = False
+        if frame_server is not None and _loop is not None and hasattr(frame_server, "attach"):
+            try:
+                host_end, our_end = socket.socketpair()
+                self._attach = asyncio.run_coroutine_threadsafe(
+                    frame_server.attach(host_end), _loop
+                )
+                self._tcp = our_end
+                attached = True
+                tcp_host, tcp_port = "in-process", 0
+                logger.debug(f"Attached in-process to frame server for '{companion_name}'")
+            except Exception as e:
+                logger.warning(
+                    f"In-process attach failed for '{companion_name}': {e}; dialling the listener"
+                )
 
-        tcp_host, tcp_port = resolved
+        if not attached:
+            # Fallback (older openhop_core without attach()): dial the TCP listener.
+            resolved = self._resolve_tcp_endpoint(companion_name)
+            if resolved is None:
+                logger.warning(f"Connection rejected: companion '{companion_name}' not found")
+                self.close(code=1008, reason="companion not found")
+                return
 
-        # Open TCP socket to the companion frame server
-        try:
-            self._tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._tcp.settimeout(5.0)
-            self._tcp.connect((tcp_host, tcp_port))
-            self._tcp.settimeout(None)
-            logger.debug(f"TCP connected to {tcp_host}:{tcp_port} for '{companion_name}'")
-        except Exception as e:
-            logger.error(f"TCP connect failed for '{companion_name}' {tcp_host}:{tcp_port}: {e}")
-            self._tcp = None
-            self.close(code=1011, reason="TCP connect failed")
-            return
+            tcp_host, tcp_port = resolved
+
+            # Open TCP socket to the companion frame server
+            try:
+                self._tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._tcp.settimeout(5.0)
+                self._tcp.connect((tcp_host, tcp_port))
+                self._tcp.settimeout(None)
+                logger.debug(f"TCP connected to {tcp_host}:{tcp_port} for '{companion_name}'")
+            except Exception as e:
+                logger.error(
+                    f"TCP connect failed for '{companion_name}' {tcp_host}:{tcp_port}: {e}"
+                )
+                self._tcp = None
+                self.close(code=1011, reason="TCP connect failed")
+                return
 
         self._closing = False
         self._companion_name = companion_name
@@ -134,6 +166,32 @@ class CompanionFrameWebSocket(WebSocket):
         self._teardown()
 
     # ── internal ─────────────────────────────────────────────────────────
+
+    def _resolve_frame_server(self, companion_name):
+        """The running frame server for a registered companion name, or ``None``.
+
+        Resolves name → identity → bridge → the frame server built on that
+        bridge. The listener need not have bound: a server whose ``start()``
+        failed is still in ``companion_frame_servers`` and can be attached.
+        """
+        if not _daemon:
+            return None
+        identity_manager = getattr(_daemon, "identity_manager", None)
+        bridges = getattr(_daemon, "companion_bridges", {}) or {}
+        servers = getattr(_daemon, "companion_frame_servers", []) or []
+        if not identity_manager or not bridges or not servers:
+            return None
+        for name, identity, _cfg in identity_manager.get_identities_by_type("companion"):
+            if name != companion_name:
+                continue
+            bridge = bridges.get(identity.get_public_key()[0])
+            if bridge is None:
+                return None
+            for server in servers:
+                if getattr(server, "bridge", None) is bridge:
+                    return server
+            return None
+        return None
 
     def _resolve_tcp_endpoint(self, companion_name):
         """Look up companion TCP host + port from daemon config.

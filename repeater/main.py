@@ -1032,7 +1032,12 @@ class RepeaterDaemon:
                         self.discovery_helper.control_handler if self.discovery_helper else None
                     ),
                 )
-                await frame_server.start()
+                # Register and list the server before the listener binds: the
+                # console reaches a companion through the WS proxy's in-process
+                # attach, which needs neither, so a listener that fails to bind
+                # (an address this host does not own, a port in use) leaves the
+                # companion registered and reachable there, and only phone
+                # clients — who dial the listener — are affected.
                 self.companion_frame_servers.append(frame_server)
 
                 if not self.identity_manager.register_identity(
@@ -1049,6 +1054,15 @@ class RepeaterDaemon:
                     )
 
                 limits = format_companion_bridge_limits(bridge_kwargs)
+                try:
+                    await frame_server.start()
+                except OSError as e:
+                    logger.error(
+                        f"Companion '{name}': listener failed to bind {bind_address}:{tcp_port}: {e}. "
+                        "The companion is registered and reachable in-process (web console); "
+                        "phone clients cannot connect until the bind address and port are fixed."
+                    )
+                    continue
                 logger.info(
                     f"Loaded companion '{name}': hash=0x{companion_hash:02x}, "
                     f"port={tcp_port}, bind={bind_address}, "

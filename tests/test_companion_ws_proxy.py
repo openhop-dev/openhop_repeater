@@ -234,3 +234,86 @@ def test_tcp_to_ws_and_teardown():
     ws2._teardown()
     tcp_ref.close.assert_called_once()
     ws2.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# In-process attach: the frame server gets a socketpair end, no listener dial
+# ---------------------------------------------------------------------------
+
+
+class _FakeLoop:
+    """Stands in for the daemon loop: records the coroutine handed across."""
+
+    def __init__(self):
+        self.scheduled = []
+
+
+def _install_attach_daemon(monkeypatch, frame_server):
+    identity = SimpleNamespace(get_public_key=lambda: b"\x56" + b"\x00" * 31)
+    bridge = object()
+    frame_server.bridge = bridge
+    daemon = SimpleNamespace(
+        identity_manager=SimpleNamespace(get_identities_by_type=lambda _t: [("c1", identity, {})]),
+        companion_bridges={0x56: bridge},
+        companion_frame_servers=[frame_server],
+    )
+    loop = _FakeLoop()
+    monkeypatch.setattr(proxy, "_daemon", daemon)
+    monkeypatch.setattr(proxy, "_loop", loop)
+
+    def _schedule(coro, target_loop):
+        assert target_loop is loop
+        loop.scheduled.append(coro)
+        coro.close()  # never run here; the test only needs to see it was handed over
+        return MagicMock()
+
+    monkeypatch.setattr(proxy.asyncio, "run_coroutine_threadsafe", _schedule)
+    return daemon, loop
+
+
+def test_opened_attaches_in_process_when_the_frame_server_offers_it(cp_cfg, monkeypatch):
+    cp_cfg["jwt_handler"] = SimpleNamespace(verify_jwt=lambda _t: {"sub": "u"})
+    ws = _ws("token=t&companion_name=c1")
+
+    class _FrameServer:
+        async def attach(self, sock):
+            self.sock = sock
+
+    server = _FrameServer()
+    _, loop = _install_attach_daemon(monkeypatch, server)
+    ws._resolve_tcp_endpoint = MagicMock(side_effect=AssertionError("must not dial"))
+    monkeypatch.setattr(proxy.threading, "Thread", lambda **_kw: MagicMock())
+
+    ws.opened()
+
+    assert len(loop.scheduled) == 1
+    assert isinstance(ws._tcp, proxy.socket.socket)
+    assert ws._tcp.family == proxy.socket.AF_UNIX
+    ws.close.assert_not_called()
+    ws._tcp.close()
+
+
+def test_opened_dials_the_listener_when_attach_is_absent(cp_cfg, monkeypatch):
+    """Older openhop_core without attach(): the TCP proxy path is unchanged."""
+    cp_cfg["jwt_handler"] = SimpleNamespace(verify_jwt=lambda _t: {"sub": "u"})
+    ws = _ws("token=t&companion_name=c1")
+
+    server = SimpleNamespace()  # no attach
+    _install_attach_daemon(monkeypatch, server)
+    ws._resolve_tcp_endpoint = MagicMock(return_value=("127.0.0.1", 5000))
+    fake_socket = MagicMock()
+    monkeypatch.setattr(proxy.socket, "socket", lambda *_args, **_kwargs: fake_socket)
+    monkeypatch.setattr(proxy.threading, "Thread", lambda **_kw: MagicMock())
+
+    ws.opened()
+
+    fake_socket.connect.assert_called_once_with(("127.0.0.1", 5000))
+    assert ws._tcp is fake_socket
+
+
+def test_resolve_frame_server_finds_the_server_built_on_the_bridge(monkeypatch):
+    server = SimpleNamespace()
+    _install_attach_daemon(monkeypatch, server)
+    ws = _ws("token=t&companion_name=c1")
+    assert ws._resolve_frame_server("c1") is server
+    assert ws._resolve_frame_server("nope") is None
