@@ -59,7 +59,7 @@ class BME280Sensor(SensorBase):
             "key": "bus_number",
             "type": "integer",
             "label": "I2C Bus Number",
-            "default": 0,
+            "default": 1,
             "help": "Linux I2C bus number",
         },
         {
@@ -74,7 +74,8 @@ class BME280Sensor(SensorBase):
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 
-        self.i2c_address = int(self.settings.get("i2c_address", 0x76))
+        addr = self.settings.get("i2c_address", 0x76)
+        self.i2c_address = int(addr, 0) if isinstance(addr, str) else int(addr)
         self.bus_number = int(self.settings.get("bus_number", 1))
         self._poll_interval = 0.005  # 5 ms between measurement-complete checks
         self._poll_attempts = max(
