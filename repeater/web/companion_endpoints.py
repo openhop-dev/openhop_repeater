@@ -493,6 +493,35 @@ class CompanionAPIEndpoints:
     @cherrypy.expose
     @cherrypy.tools.json_out()
     @require_auth
+    def messages(self, **kwargs):
+        """GET /api/companion/messages?since=<id>&limit=<n> — received message history.
+
+        Oldest first, ``id`` ascending; pass the last ``id`` seen as ``since`` to
+        read only what is new. 404 when the companion does not keep history
+        (``message_history``), the same answer an older repeater gives.
+        """
+        bridge = self._get_bridge(**self._resolve_bridge_params(kwargs))
+        if not getattr(bridge, "message_history", False):
+            raise cherrypy.HTTPError(404, "This companion does not keep message history")
+        try:
+            since = int(kwargs.get("since", 0))
+            limit = max(1, min(int(kwargs.get("limit", 100)), 500))
+        except (TypeError, ValueError):
+            raise cherrypy.HTTPError(400, "since and limit must be integers")
+        rows = self._get_sqlite_handler().companion_load_history(
+            bridge.get_public_key(), since, limit
+        )
+        if rows is None:
+            raise cherrypy.HTTPError(503, "Message history unavailable")
+        for row in rows:
+            row["sender_key"] = row["sender_key"].hex()
+            row["channel_data_payload"] = row["channel_data_payload"].hex()
+            row["is_channel"] = bool(row["is_channel"])
+        return self._success(rows)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @require_auth
     def send_text(self, **kwargs):
         """POST /api/companion/send_text  {pub_key, text, txt_type?, companion_name?}"""
         self._require_post()

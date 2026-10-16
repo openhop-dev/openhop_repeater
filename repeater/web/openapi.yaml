@@ -4938,6 +4938,36 @@ paths:
               schema:
                 type: object
 
+  /companion/messages:
+    get:
+      tags: [System]
+      summary: Received companion message history, oldest first
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: The companion does not keep message history (`message_history` is off)
+
   /companion/send_text:
     post:
       tags: [System]
