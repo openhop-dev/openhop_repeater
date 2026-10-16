@@ -52,6 +52,48 @@ def test_get_radio_for_board_passes_en_pins(monkeypatch):
     assert "en_pin" not in captured_kwargs
 
 
+def test_get_radio_for_board_passes_lr1121_chip_and_rf_switch(monkeypatch):
+    captured_kwargs = {}
+
+    class _DummySX1262Radio(_DummyRadio):
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "openhop_core.hardware.sx1262_wrapper.SX1262Radio",
+        _DummySX1262Radio,
+    )
+
+    board_config = {
+        "radio_type": "sx1262",
+        "sx1262": {
+            "bus_id": 0,
+            "cs_id": 1,
+            "cs_pin": -1,
+            "reset_pin": 18,
+            "busy_pin": 17,
+            "irq_pin": 27,
+            "txen_pin": -1,
+            "rxen_pin": -1,
+            "chip": "LR1121",
+            "rf_switch": [3, 0, 2, 3, 1, 0, 0, 0],
+        },
+        "radio": {
+            "frequency": 915000000,
+            "tx_power": 22,
+            "spreading_factor": 9,
+            "bandwidth": 125000,
+            "coding_rate": 5,
+            "preamble_length": 17,
+        },
+    }
+
+    get_radio_for_board(board_config)
+
+    assert captured_kwargs["chip"] == "lr1121"
+    assert captured_kwargs["rf_switch"] == [3, 0, 2, 3, 1, 0, 0, 0]
+
+
 def test_get_radio_for_board_null_radio_type_returns_null_radio():
     radio = get_radio_for_board({"radio_type": None})
     assert type(radio).__name__ == "NullRadio"
