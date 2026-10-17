@@ -854,9 +854,15 @@ def get_radio_for_board(board_config: dict):
 
         return BaselineCrcCounterRadio(radio)
 
+    if radio_type == "external":
+        raise RuntimeError(
+            "radio_type 'external' needs the radio passed to RepeaterDaemon(radio=...); "
+            "the repeater builds no hardware from it"
+        )
+
     raise RuntimeError(
         f"Unknown radio type: {radio_type}. "
-        "Supported: sx1262, sx1262_ch341, kiss (or kiss-modem), modem_tcp, modem_usb"
+        "Supported: sx1262, sx1262_ch341, kiss (or kiss-modem), modem_tcp, modem_usb, external"
     )
 
 
@@ -1192,6 +1198,9 @@ _RADIO_AIR_DEFAULTS = {
     "kiss": {"preamble_length": 32, "tx_power": 14},
     "modem_tcp": {"preamble_length": 16, "tx_power": 22},
     "modem_usb": {"preamble_length": 16, "tx_power": 22},
+    # A radio the host built itself and passed to RepeaterDaemon(radio=...).
+    # Nothing is known about it beyond the radio section, so no defaults.
+    "external": {},
 }
 _RADIO_AIR_COMMON_DEFAULTS = {
     "frequency": 869618000,
@@ -1199,6 +1208,11 @@ _RADIO_AIR_COMMON_DEFAULTS = {
     "spreading_factor": 8,
     "coding_rate": 8,
 }
+
+
+# (radio_id, radio_type) pairs already warned about: the profile is rebuilt on
+# every config read, and one warning per radio is enough.
+_UNSUPPORTED_RADIO_WARNED: set = set()
 
 
 def _radio_air_profile(board_config: dict, radio_id: str) -> Optional[dict]:
@@ -1222,16 +1236,28 @@ def _radio_air_profile(board_config: dict, radio_id: str) -> Optional[dict]:
         # get_radio_for_board rejects this type, so no hardware was built from
         # it. Reporting a default-backed profile would describe a radio that is
         # not on the air.
-        logger.warning(
-            "No airtime profile for radio %s: unsupported radio_type=%r", radio_id, radio_type_raw
-        )
+        key = (str(radio_id), radio_type)
+        if key in _UNSUPPORTED_RADIO_WARNED:
+            logger.debug(
+                "No airtime profile for radio %s: unsupported radio_type=%r", radio_id, radio_type_raw
+            )
+        else:
+            _UNSUPPORTED_RADIO_WARNED.add(key)
+            logger.warning(
+                "No airtime profile for radio %s: unsupported radio_type=%r", radio_id, radio_type_raw
+            )
         return None
 
     radio_cfg = board_config.get("radio")
     if not isinstance(radio_cfg, dict):
         radio_cfg = {}
-    defaults = dict(_RADIO_AIR_COMMON_DEFAULTS)
-    defaults.update(_RADIO_AIR_DEFAULTS[radio_type])
+    if radio_type == "external":
+        # Every field comes from the radio section: a missing one is reported
+        # as unknown rather than filled from a default the host never used.
+        defaults: dict = {}
+    else:
+        defaults = dict(_RADIO_AIR_COMMON_DEFAULTS)
+        defaults.update(_RADIO_AIR_DEFAULTS[radio_type])
 
     def _field(name: str, required: bool = True) -> Optional[int]:
         value = radio_cfg.get(name, defaults.get(name))
