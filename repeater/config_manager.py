@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from repeater.config import validate_duty_cycle_config
 from repeater.logging_utils import normalize_log_level
 from repeater.modem_config import normalize_modem_config_in_place
 
@@ -272,6 +273,7 @@ class ConfigManager:
         with _CONFIG_WRITE_LOCK:
             try:
                 candidate = copy.deepcopy(self.config)
+                validate_duty_cycle_config(candidate)
                 if not self._persist_config(candidate):
                     return False
                 normalize_modem_config_in_place(self.config)
@@ -469,7 +471,15 @@ class ConfigManager:
             if "radio" in sections:
                 live_update_ok = self._apply_live_radio_config() and live_update_ok
             elif "duty_cycle" in sections:
-                self._refresh_airtime_radio_params()
+                repeater_handler = getattr(self.daemon, "repeater_handler", None)
+                budgets = getattr(repeater_handler, "airtime_budgets", None)
+                configured_scope = validate_duty_cycle_config(self.config)
+                active_scope = getattr(budgets, "budget_scope", configured_scope)
+                if configured_scope != active_scope:
+                    logger.info("duty_cycle.budget_scope change detected; service restart required")
+                    live_update_ok = False
+                else:
+                    self._refresh_airtime_radio_params()
 
             if "http" in sections:
                 live_update_ok = self._apply_live_http_config() and live_update_ok
@@ -515,6 +525,7 @@ class ConfigManager:
                 updates = copy.deepcopy(updates)
                 candidate = copy.deepcopy(self.config)
                 self._apply_updates(candidate, updates)
+                validate_duty_cycle_config(candidate)
                 result["saved"] = self._persist_config(candidate)
 
                 if not result["saved"]:

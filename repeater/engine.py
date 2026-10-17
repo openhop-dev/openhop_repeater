@@ -178,9 +178,9 @@ class RepeaterHandler(BaseHandler):
         self.local_hash_bytes = local_hash_bytes or bytes([local_hash])
         self.send_advert_func = send_advert_func
         self.periodic_advert_tick_func = periodic_advert_tick_func
-        # One budget per channel; on a single-radio node this is the one manager
-        # it always had. airtime_mgr stays the default radio's, because
-        # everything that reports a single utilisation figure reads it.
+        # One view per radio backed by the configured budget grouping. On a
+        # single-radio node this is the manager it always had. airtime_mgr stays
+        # the default radio's, because single-value reports read it.
         self.airtime_budgets = AirtimeBudgets(config)
         self.airtime_mgr = self.airtime_budgets.default
         self.policy_engine = PolicyEngine.from_runtime_config(config)
@@ -2138,17 +2138,16 @@ class RepeaterHandler(BaseHandler):
         """Node-wide airtime figures, in the shape AirtimeManager.get_stats returns.
 
         The single place for callers that report one set of numbers for the
-        node. Reading ``airtime_mgr`` instead describes the default radio's
-        channel only, which on a bridge is a quiet halving of figures people
-        have been watching for months.
+        node. Reading ``airtime_mgr`` instead describes only the default radio's
+        budget, which can quietly under-report a multi-radio node.
         """
         return self.airtime_budgets.node_stats()
 
     def airtime_stats_by_radio(self) -> list:
         """``[{radio_id, ...}]`` per radio, empty on a single-radio node.
 
-        Radios sharing a channel report the same figures because they are the
-        same budget, which is the statement rather than a duplication.
+        Radios sharing a configured budget report the same figures, which is
+        the statement rather than a duplication.
         """
         return self.airtime_budgets.per_radio_stats()
 

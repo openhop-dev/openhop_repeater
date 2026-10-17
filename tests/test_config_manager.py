@@ -243,6 +243,46 @@ def test_live_duty_cycle_update_refreshes_the_cached_limit():
     assert budgets.default.max_airtime_per_minute == 600
 
 
+def test_live_budget_scope_change_is_saved_for_restart_without_regrouping_runtime():
+    config = {
+        "radio": {
+            "frequency": 910100000,
+            "bandwidth": 500000,
+            "spreading_factor": 7,
+            "coding_rate": 5,
+            "preamble_length": 8,
+        },
+        "radios": [
+            {
+                "id": "north",
+                "radio_type": "sx1262",
+                "radio": {"frequency": 910100000, "bandwidth": 500000},
+            },
+            {
+                "id": "south",
+                "radio_type": "sx1262",
+                "radio": {"frequency": 910100000, "bandwidth": 500000},
+            },
+        ],
+        "duty_cycle": {"max_airtime_per_minute": 3600, "enforcement_enabled": True},
+    }
+    budgets = AirtimeBudgets(config)
+    budgets.for_radio("north").record_tx(900)
+    handler = _DummyRepeaterHandler(config)
+    handler.airtime_budgets = budgets
+    handler.airtime_mgr = budgets.default
+    daemon = _DummyDaemon(config, _DummySX1262Radio())
+    daemon.repeater_handler = handler
+    manager = ConfigManager("/tmp/config.yaml", config, daemon)
+
+    config["duty_cycle"]["budget_scope"] = "radio"
+
+    assert manager.live_update_daemon(["duty_cycle"]) is False
+    assert budgets.budget_scope == "channel"
+    assert budgets.shares_budget("north", "south")
+    assert budgets.for_radio("south").get_stats()["current_airtime_ms"] == 900
+
+
 def test_non_default_radio_change_requires_restart_and_keeps_runtime_metering():
     config = {
         "radio": {
