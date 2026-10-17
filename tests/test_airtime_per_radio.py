@@ -356,3 +356,63 @@ def test_unsupported_radio_type_has_no_profile():
     """get_radio_for_board would reject it, so no radio was built from it."""
     assert build_radio_profiles({"radio_type": "sx1280", "radio": {"spreading_factor": 8}}) == []
     assert build_radio_profiles({"radio_type": "none"}) == []
+
+
+def test_external_radio_profile_comes_from_the_radio_section_only():
+    """A host-built radio: every field is what the host configured, no defaults."""
+    config = {
+        "radio_type": "external",
+        "radio": {
+            "frequency": 433175000,
+            "bandwidth": 250000,
+            "spreading_factor": 10,
+            "coding_rate": 5,
+            "preamble_length": 8,
+            "tx_power": 17,
+        },
+    }
+
+    (profile,) = build_radio_profiles(config)
+
+    assert profile["radio_type"] == "external"
+    assert profile["frequency_hz"] == 433175000
+    assert profile["bandwidth_hz"] == 250000
+    assert profile["spreading_factor"] == 10
+    assert profile["coding_rate"] == 5
+    assert profile["preamble_length"] == 8
+    assert profile["tx_power"] == 17
+
+
+def test_external_radio_missing_field_is_reported_unknown_not_defaulted():
+    """No common default is invented for a radio the repeater did not build."""
+    config = {
+        "radio_type": "external",
+        "radio": {"bandwidth": 250000, "spreading_factor": 10, "coding_rate": 5, "preamble_length": 8},
+    }
+
+    (profile,) = build_radio_profiles(config)
+
+    assert profile["frequency_hz"] is None
+    assert profile["bandwidth_hz"] == 250000
+
+
+def test_unsupported_radio_type_warns_once_per_radio(caplog):
+    """The profile is rebuilt on every config read; the warning is not."""
+    from repeater import config as config_module
+
+    config_module._UNSUPPORTED_RADIO_WARNED.clear()
+    config = {"radio_type": "sx1280", "radio": {"spreading_factor": 8}}
+    with caplog.at_level("WARNING", logger="repeater.config"):
+        for _ in range(3):
+            assert build_radio_profiles(config) == []
+
+    warnings = [r for r in caplog.records if "unsupported radio_type" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_get_radio_for_board_refuses_external():
+    """The host passes the radio in; the repeater never builds one from this type."""
+    from repeater.config import get_radio_for_board
+
+    with pytest.raises(RuntimeError, match=r"RepeaterDaemon\(radio=\.\.\.\)"):
+        get_radio_for_board({"radio_type": "external", "radio": {"frequency": 433175000}})

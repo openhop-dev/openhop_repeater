@@ -1467,6 +1467,38 @@ kiss:
     assert result["data"]["summary"]["error_count"] == 0
 
 
+def test_validate_config_valid_external_radio_configuration(cherrypy_ctx, tmp_path):
+    """An externally provided radio needs its radio section, not an sx1262 pin section."""
+    request, _ = cherrypy_ctx
+    request.method = "GET"
+    api = _make_api()
+    api._config_path = str(tmp_path / "config.yaml")
+    (tmp_path / "config.yaml").write_text(
+        """
+repeater:
+  node_name: mesh-node-01
+  security:
+    admin_password: supersecret
+radio_type: external
+radio:
+  frequency: 433175000
+  bandwidth: 250000
+  spreading_factor: 10
+  coding_rate: 5
+  tx_power: 17
+  preamble_length: 8
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = api.validate_config()
+
+    assert result["success"] is True
+    assert result["data"]["valid"] is True
+    assert result["data"]["summary"]["error_count"] == 0
+    assert not any(e["field"].startswith("sx1262") for e in result["data"]["errors"])
+
+
 def test_validate_config_disabled_radio_warns_but_valid(cherrypy_ctx, tmp_path):
     request, _ = cherrypy_ctx
     request.method = "GET"
