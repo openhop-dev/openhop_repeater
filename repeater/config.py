@@ -662,6 +662,8 @@ def get_radio_for_board(board_config: dict):
             "coding_rate": radio_config["coding_rate"],
             "preamble_length": radio_config["preamble_length"],
             "sync_word": _parse_int(radio_config.get("sync_word", 0x12)),
+            "pa_config": str(spi_config.get("pa_config", "sx1262")).lower().strip(),
+            "max_tx_power": _parse_int(spi_config.get("max_tx_power"), default=None),
         }
 
         en_pin = _parse_int(spi_config.get("en_pin"), default=None)
