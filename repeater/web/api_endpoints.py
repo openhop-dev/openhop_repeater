@@ -4277,7 +4277,8 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def rrd_data(self):
+    def rrd_data(self, **kwargs):
+        # CherryPy dispatches query parameters as keywords before _get_params reads them.
         try:
             params = self._get_params(
                 {"start_time": None, "end_time": None, "resolution": "average"}
