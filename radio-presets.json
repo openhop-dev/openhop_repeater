@@ -221,9 +221,9 @@
                 },
                 {
                     "title": "USA - Philadelphia (PhillyMesh)",
-                    "description": "902.250MHz / SF11 / BW500 / CR5 / 2B",
-                    "frequency": "902.250",
-                    "spreading_factor": "11",
+                    "description": "919.500MHz / SF10 / BW500 / CR5 / 2B",
+                    "frequency": "919.500",
+                    "spreading_factor": "10",
                     "bandwidth": "500",
                     "coding_rate": "5",
                     "network_settings": {
