@@ -75,7 +75,7 @@ class WaveshareUpsDSensor(SensorBase):
             "key": "bus_number",
             "type": "integer",
             "label": "I2C Bus Number",
-            "default": 0,
+            "default": 1,
             "help": "Linux I2C bus number",
         },
     ]
@@ -83,7 +83,8 @@ class WaveshareUpsDSensor(SensorBase):
     def __init__(self, name: str, config: Optional[Dict[str, Any]] = None, log=None):
         super().__init__(name=name, config=config, log=log)
 
-        self.i2c_address = int(self.settings.get("i2c_address", 0x43))
+        addr = self.settings.get("i2c_address", 0x43)
+        self.i2c_address = int(addr, 0) if isinstance(addr, str) else int(addr)
         self.bus_number = int(self.settings.get("bus_number", 1))
 
         self.available = False
