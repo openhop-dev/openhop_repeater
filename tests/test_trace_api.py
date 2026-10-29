@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import cherrypy
 import pytest
-
 from openhop_core.protocol.constants import ROUTE_TYPE_DIRECT
 
 from repeater.handler_helpers.trace import TraceHelper
