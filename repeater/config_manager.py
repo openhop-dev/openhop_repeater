@@ -434,6 +434,13 @@ class ConfigManager:
                     f"{self.daemon.dispatcher.rx_delay_base}"
                 )
 
+            # Re-apply the AGC reset interval when the repeater section changed
+            if "repeater" in sections and self.daemon and getattr(self.daemon, "dispatcher", None):
+                repeater_cfg = self.daemon.config.get("repeater", {})
+                self.daemon.dispatcher.agc_reset_interval = int(
+                    repeater_cfg.get("agc_reset_interval", 0)
+                )
+
             # Re-apply dispatcher path hash mode when mesh section changed
             if "mesh" in sections and self.daemon and hasattr(self.daemon, "dispatcher"):
                 mesh_cfg = self.daemon.config.get("mesh", {})
