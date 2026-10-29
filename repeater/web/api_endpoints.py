@@ -3265,10 +3265,17 @@ class APIEndpoints:
                         new_broker["username"] = b.get("username", None)
                         password = b.get("password", None)
                         if password == REDACTED_CONFIG_VALUE:
-                            # /api/stats sends this in place of the stored password.
-                            password = stored_passwords_by_name.get(new_broker["name"])
+                            # /api/stats sends this in place of the stored password;
+                            # previous_name lets a renamed broker keep it.
+                            lookup_name = str(b.get("previous_name") or new_broker["name"]).strip()
+                            password = stored_passwords_by_name.get(lookup_name)
                             if not password:
                                 return self._error(f"Broker at index {i}: enter its password again")
+                        elif isinstance(password, str) and REDACTED_CONFIG_VALUE in password:
+                            return self._error(
+                                f"Broker at index {i}: clear the password field before "
+                                "entering a new password"
+                            )
                         new_broker["password"] = password
 
                     validated.append(new_broker)

@@ -3089,6 +3089,52 @@ def test_update_mqtt_config_keeps_a_password_posted_back_as_the_sentinel(cherryp
     assert "password" in api.update_mqtt_config()["error"]
 
 
+def test_update_mqtt_config_renamed_broker_keeps_password_via_previous_name(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api({"mqtt_brokers": {"brokers": [{"name": "lan", "password": "mqtt-pw"}]}})
+    api.config_manager.update_and_save.return_value = {"success": True, "saved": True}
+    request.method = "POST"
+    request.json = {
+        "brokers": [
+            {
+                "name": "renamed",
+                "previous_name": "lan",
+                "host": "h",
+                "port": 1883,
+                "format": "mqtt",
+                "username": "u",
+                "password": "*** REDACTED ***",
+            }
+        ]
+    }
+
+    assert api.update_mqtt_config()["success"] is True
+    saved = api.config_manager.update_and_save.call_args.kwargs["updates"]["mqtt_brokers"]
+    assert saved["brokers"][0]["name"] == "renamed"
+    assert saved["brokers"][0]["password"] == "mqtt-pw"
+    assert "previous_name" not in saved["brokers"][0]
+
+
+def test_update_mqtt_config_rejects_text_typed_after_the_sentinel(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api({"mqtt_brokers": {"brokers": [{"name": "lan", "password": "mqtt-pw"}]}})
+    request.method = "POST"
+    request.json = {
+        "brokers": [
+            {
+                "name": "lan",
+                "host": "h",
+                "port": 1883,
+                "format": "mqtt",
+                "password": "*** REDACTED ***newpw",
+            }
+        ]
+    }
+
+    assert "clear the password field" in api.update_mqtt_config()["error"]
+    api.config_manager.update_and_save.assert_not_called()
+
+
 def test_restart_service_options_method_and_result_paths(cherrypy_ctx):
     request, _ = cherrypy_ctx
     api = _make_api()
