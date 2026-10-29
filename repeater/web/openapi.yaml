@@ -2320,8 +2320,8 @@ paths:
                 path:
                   type: array
                   minItems: 1
-                  maxItems: 61
-                  description: Ordered hops, for example ["d0"]. The local repeater is added at both ends automatically.
+                  maxItems: 62
+                  description: Ordered hops, for example ["d0"]. The local repeater is added at both ends automatically. Each string hop must be exactly 2, 4, or 8 hex characters (optional 0x prefix) to match the hash width. Limit is 62 hops for 1-byte, 62 for 2-byte, and 42 for 4-byte hashes.
                   items:
                     type: string
                 path_hash_mode:

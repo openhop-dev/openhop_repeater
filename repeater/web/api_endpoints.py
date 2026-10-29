@@ -14,7 +14,7 @@ from typing import Callable, Optional
 import cherrypy
 import yaml
 from openhop_core.protocol import CryptoUtils
-from openhop_core.protocol.constants import MAX_PACKET_PAYLOAD
+from openhop_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
 
 from repeater import __version__
 from repeater.companion.identity_resolve import (
@@ -5956,20 +5956,36 @@ class APIEndpoints:
 
             # TRACE flags use MeshCore's exponent encoding: 1, 2, or 4 bytes
             # per hop for flags 0, 1, or 2. This differs from the ordinary
-            # packet path hash mode, whose mode 2 means three bytes.
+            # packet path hash mode, whose mode 2 means three bytes; a 3-byte
+            # config therefore defaults to 4-byte TRACE hashes.
             byte_count = 1 << path_hash_mode
-            max_hops = min(63, (MAX_PACKET_PAYLOAD - 9) // byte_count)
-            if len(raw_path) > max_hops:
-                return self._error(f"path cannot contain more than {max_hops} hops")
+            hex_chars = byte_count * 2
+            # On-air hops are the remote hops plus the closing local hop; 9 = tag+auth+flags.
+            max_wire_hops = min(MAX_PATH_SIZE - 1, (MAX_PACKET_PAYLOAD - 9) // byte_count)
+            max_remote_hops = max_wire_hops - 1
+            if len(raw_path) > max_remote_hops:
+                return self._error(
+                    f"path cannot contain more than {max_remote_hops} hops "
+                    f"for {byte_count}-byte hashes"
+                )
 
             path_values = []
             max_hash = (1 << (byte_count * 8)) - 1
             for hop in raw_path:
-                try:
-                    value = int(hop, 16) if isinstance(hop, str) else int(hop)
-                except (TypeError, ValueError):
-                    return self._error(f"Invalid path hop: {hop}")
-                if isinstance(hop, bool) or value < 0 or value > max_hash:
+                if isinstance(hop, str):
+                    digits = hop[2:] if hop.lower().startswith("0x") else hop
+                    if len(digits) != hex_chars or not all(
+                        c in "0123456789abcdefABCDEF" for c in digits
+                    ):
+                        return self._error(
+                            f"Invalid path hop {hop!r}: expected {hex_chars} hex characters"
+                        )
+                    value = int(digits, 16)
+                elif isinstance(hop, int) and not isinstance(hop, bool):
+                    value = hop
+                else:
+                    return self._error(f"Invalid path hop: {hop!r}")
+                if value < 0 or value > max_hash:
                     return self._error(f"Each path hop must be a valid {byte_count}-byte hash")
                 path_values.append(value)
 
@@ -5983,15 +5999,12 @@ class APIEndpoints:
             local_hash = int.from_bytes(public_key[:byte_count], "big")
             # Callers supply route hops; local endpoints are API-owned.
             # Do not reject or reinterpret values that happen to equal local_hash.
-            if len(path_values) + 2 > max_hops:
-                return self._error(f"closed path cannot contain more than {max_hops} hops")
             path_values = [local_hash, *path_values, local_hash]
 
             trace_flags = path_hash_mode
             # Injection transmits immediately; the origin is not an RF hop.
             path_bytes = b"".join(value.to_bytes(byte_count, "big") for value in path_values[1:])
             target_hash = path_values[-1]
-            hex_chars = byte_count * 2
 
             if not hasattr(self.daemon_instance, "router"):
                 return self._error("Packet router not available")

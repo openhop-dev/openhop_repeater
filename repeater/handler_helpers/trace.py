@@ -128,6 +128,10 @@ class TraceHelper:
                             "received_at": time.time(),
                         }
                         ping_info["event"].set()
+                        if self.repeater_handler:
+                            self.repeater_handler.log_trace_record(
+                                self._create_trace_record(packet, parsed_data)
+                            )
                         # Consume at the originating repeater; do not transmit
                         # another copy after the closed route has returned.
                         return
