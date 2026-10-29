@@ -8,6 +8,7 @@ schema evolution when NodePrefs gains or loses fields.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections.abc import Mapping
@@ -15,10 +16,16 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from openhop_core.companion import CompanionBridge
+from openhop_core.companion.constants import TXT_TYPE_CLI_COMMAND, TXT_TYPE_CLI_DATA
+from openhop_core.companion.models import MessageEvent
 
 from repeater import __version__ as repeater_version
 
 logger = logging.getLogger("RepeaterCompanionBridge")
+
+# How long stop() lets queued history rows be written: inside the daemon's 5 s
+# shutdown step.
+_HISTORY_FLUSH_TIMEOUT_SEC = 3.0
 
 
 def _prefs_bytes_from_json(value: Any) -> bytes:
@@ -77,10 +84,16 @@ class RepeaterCompanionBridge(CompanionBridge):
         sqlite_handler=None,
         companion_hash: str = "",
         on_prefs_saved: Optional[Callable[[str], None]] = None,
+        message_history: bool = False,
     ) -> None:
         self._sqlite_handler = sqlite_handler
         self._companion_hash = companion_hash
         self._on_prefs_saved = on_prefs_saved
+        self.message_history = bool(message_history and sqlite_handler)
+        # History rows wait here while another connection holds SQLite's write lock
+        # (a VACUUM, a purge): as many as the offline queue holds by default.
+        self._history_queue: asyncio.Queue = asyncio.Queue(maxsize=512)
+        self._history_writer: Optional[asyncio.Task] = None
         super().__init__(
             identity=identity,
             packet_injector=packet_injector,
@@ -104,6 +117,101 @@ class RepeaterCompanionBridge(CompanionBridge):
             except Exception as e:
                 # Cosmetic: never let it stop the companion loading.
                 logger.warning("Could not register the repeater version with the CLI: %s", e)
+        if self.message_history:
+            # Subscribed here rather than in the frame server's persistence hook:
+            # core calls that only for a message the offline queue kept, and the
+            # queue keeps none at offline_queue_size 0 or when full of direct ones.
+            self.on_message_event(self._record_history)
+            self.on_channel_message_event(self._record_history)
+            self.on_channel_data_event(self._record_history)
+            # What every client sends. An older core does not report it.
+            on_message_sent = getattr(self, "on_message_sent", None)
+            if callable(on_message_sent):
+                on_message_sent(self._record_sent)
+
+    def _record_history(self, event) -> None:
+        """Record a received MessageEvent, ChannelMessageEvent or ChannelDataEvent.
+
+        A field the event type lacks takes the value the frame queue stores for it.
+        """
+        # CLI traffic is remote administration, not conversation, and a reply can
+        # echo a secret: MeshCore's CommonCLI answers "password <new>" with
+        # "password now: <new>". Core does not report the CLI commands sent.
+        if getattr(event, "txt_type", 0) in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND):
+            return
+        msg = {
+            "sender_key": getattr(event, "sender_key", b""),
+            "txt_type": getattr(event, "txt_type", 0),
+            "timestamp": getattr(event, "timestamp", 0),
+            "text": getattr(event, "text", ""),
+            "is_channel": not isinstance(event, MessageEvent),
+            "channel_idx": getattr(event, "channel_idx", 0),
+            "path_len": event.path_len,
+            "sender_prefix": getattr(event, "sender_prefix", b""),
+            "snr": event.snr,
+            "rssi": event.rssi,
+            "channel_data_type": getattr(event, "data_type", 0),
+            "channel_data_payload": getattr(event, "payload", b""),
+            "packet_hash": event.packet_hash,
+        }
+        self._queue_history(msg)
+
+    def _record_sent(self, event) -> None:
+        """Record a SentMessageEvent, whose sender is this companion."""
+        msg = {
+            "sender_key": self.get_public_key(),
+            "recipient_key": event.recipient_key or b"",
+            "txt_type": event.txt_type,
+            "timestamp": event.timestamp,
+            "text": event.text,
+            "is_channel": event.channel_idx is not None,
+            "channel_idx": event.channel_idx or 0,
+            "expected_ack": event.expected_ack,
+        }
+        self._queue_history(msg)
+
+    def _queue_history(self, msg: dict) -> None:
+        """Queue a row for the history writer.
+
+        Synchronous so that core, which awaits each callback in turn, sends the
+        packet and runs later callbacks without waiting for SQLite.
+        """
+        if self._history_writer is None:
+            self._history_writer = asyncio.create_task(self._write_history())
+        try:
+            self._history_queue.put_nowait((self.get_public_key(), msg))
+        except asyncio.QueueFull:
+            logger.warning(
+                "Companion %s: message history queue full (%d), dropping a message",
+                self._companion_hash,
+                self._history_queue.maxsize,
+            )
+
+    async def _write_history(self) -> None:
+        """Write queued rows in order."""
+        while True:
+            public_key, msg = await self._history_queue.get()
+            await asyncio.to_thread(self._sqlite_handler.companion_record_history, public_key, msg)
+            self._history_queue.task_done()
+
+    async def stop(self) -> None:
+        """Stop, then give queued history rows _HISTORY_FLUSH_TIMEOUT_SEC to be written.
+
+        The writer is left running: the router still delivers messages while it
+        drains, after the bridges stop, and asyncio.run() ends the writer with the loop.
+        """
+        await super().stop()
+        if self._history_writer is None:
+            return
+        try:
+            await asyncio.wait_for(self._history_queue.join(), _HISTORY_FLUSH_TIMEOUT_SEC)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Companion %s: %d message(s) not written to the history before stopping",
+                self._companion_hash,
+                # The writer holds the row it is trying to write.
+                self._history_queue.qsize() + 1,
+            )
 
     def _save_prefs(self) -> None:
         """Persist full NodePrefs as JSON to SQLite."""
