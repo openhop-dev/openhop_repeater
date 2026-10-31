@@ -3441,6 +3441,7 @@ class APIEndpoints:
                     "kiss",
                     "modem_tcp",
                     "modem_usb",
+                    "external",
                     "none",
                     "null",
                     "disabled",
@@ -3451,7 +3452,7 @@ class APIEndpoints:
                 if radio_type not in known_radio_types:
                     add_error(
                         "radio_type",
-                        "Unsupported radio_type. Supported: sx1262, sx1262_ch341, kiss, modem_tcp, modem_usb, none/null",
+                        "Unsupported radio_type. Supported: sx1262, sx1262_ch341, kiss, modem_tcp, modem_usb, external, none/null",
                     )
 
                 radio_disabled = radio_type in ("", "none", "null", "disabled", "off", "no_radio")
