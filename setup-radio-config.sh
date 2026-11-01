@@ -284,9 +284,9 @@ else
     tx_power=$(echo "$hw_config" | jq -r '.tx_power // empty')
     preamble_length=$(echo "$hw_config" | jq -r '.preamble_length // empty')
     is_waveshare=$(echo "$hw_config" | jq -r '.is_waveshare // empty')
-    use_dio3_tcxo=$(echo "$hw_config" | jq -r '.use_dio3_tcxo // empty')
+    use_dio3_tcxo=$(echo "$hw_config" | jq -r '.use_dio3_tcxo | values')
     dio3_tcxo_voltage=$(echo "$hw_config" | jq -r '.dio3_tcxo_voltage // empty')
-    use_dio2_rf=$(echo "$hw_config" | jq -r '.use_dio2_rf // empty')
+    use_dio2_rf=$(echo "$hw_config" | jq -r '.use_dio2_rf | values')
 
     # Update radio_type + optional CH341 section
     if [ -n "$radio_type" ]; then
