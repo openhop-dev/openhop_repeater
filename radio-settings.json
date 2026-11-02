@@ -14,6 +14,8 @@
       "rxled_pin": -1,
       "tx_power": 22,
       "preamble_length": 32,
+      "use_dio3_tcxo": false,
+      "use_dio2_rf": true,
       "is_waveshare": true
     },
     "uconsole_aiov1": {
