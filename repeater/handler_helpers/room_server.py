@@ -35,12 +35,19 @@ PUSH_ACK_TIMEOUT_FACTOR_MS = 2000
 MAX_POST_TEXT_LEN = 151
 MAX_POSTS_PER_CLIENT_PER_MINUTE = 10  # Prevent spam
 MAX_CLIENTS_PER_ROOM = 50  # From ACL default
-MAX_PUSH_FAILURES = 3  # Evict after this many consecutive failures
-INACTIVE_CLIENT_TIMEOUT = 3600  # Evict after 1 hour inactivity (seconds)
+MAX_PUSH_FAILURES = 3  # Warn after this many consecutive failures
+# Evict after 7 days without contact (seconds). Clients do not send keep-alives
+# (firmware's login reply sets the keep-alive interval to 0), so activity only
+# moves on a login, a post or an ACKed push. A short timeout here dropped every
+# member of a quiet room, who then got nothing until they logged in again.
+# Firmware never evicts idle clients; this only bounds the ACL.
+INACTIVE_CLIENT_TIMEOUT = 7 * 24 * 3600
 MAX_CONSECUTIVE_SYNC_ERRORS = 10  # Circuit breaker threshold
 DB_ERROR_RETRY_DELAY = 60  # Wait 1 minute on DB error (seconds)
 
-# Backoff strategy for failed pushes (seconds)
+# Backoff strategy for failed pushes (seconds). After the last step a client
+# keeps being retried at that interval rather than dropped, so one that walks
+# out of range catches up on its own when it is back.
 RETRY_BACKOFF_SCHEDULE = [0, 30, 300, 3600]  # 0s, 30s, 5min, 1hr
 
 # Note: Server/system messages now use the room server's actual public key
@@ -335,10 +342,13 @@ class RoomServer:
                 # is already prevented by the author exclusion in the
                 # unsynced-message query. Advancing it on post would skip other
                 # authors' older, still-unsynced messages for this client.
+                # Failures are cleared so pushes to the author resume at once
+                # (firmware resets push_failures on any message from a client).
                 self.db.upsert_client_sync(
                     room_hash=f"0x{self.room_hash:02X}",
                     client_pubkey=client_pubkey.hex(),
                     last_activity=time.time(),
+                    push_failures=0,
                 )
 
                 # Trigger push notification
@@ -353,6 +363,17 @@ class RoomServer:
             logger.error(f"Error adding post: {e}", exc_info=True)
             return False
 
+    @staticmethod
+    def _backoff_remaining(sync_state: Dict) -> float:
+        """Seconds left before a client with failed pushes may be retried (0 if none)."""
+        failures = sync_state.get("push_failures", 0)
+        if failures <= 0:
+            return 0.0
+        backoff_idx = min(failures, len(RETRY_BACKOFF_SCHEDULE) - 1)
+        backoff_delay = RETRY_BACKOFF_SCHEDULE[backoff_idx]
+        time_since_failure = time.time() - sync_state.get("updated_at", 0)
+        return max(0.0, backoff_delay - time_since_failure)
+
     async def push_post_to_client(self, client_info, post: Dict) -> bool:
 
         try:
@@ -364,21 +385,9 @@ class RoomServer:
 
             if sync_state:
                 failures = sync_state.get("push_failures", 0)
-                if failures >= MAX_PUSH_FAILURES:
-                    logger.debug(
-                        f"Room '{self.room_name}': Client 0x{client_info.id.get_public_key()[0]:02X} "
-                        f"at max failures ({failures}), skipping push"
-                    )
-                    return False
                 if failures > 0:
-                    # Apply exponential backoff
-                    backoff_idx = min(failures, len(RETRY_BACKOFF_SCHEDULE) - 1)
-                    backoff_delay = RETRY_BACKOFF_SCHEDULE[backoff_idx]
-                    last_failure_time = sync_state.get("updated_at", 0)
-                    time_since_failure = time.time() - last_failure_time
-
-                    if time_since_failure < backoff_delay:
-                        wait_time = backoff_delay - time_since_failure
+                    wait_time = self._backoff_remaining(sync_state)
+                    if wait_time > 0:
                         logger.debug(
                             f"Room '{self.room_name}': Client 0x{client_info.id.get_public_key()[0]:02X} "
                             f"in backoff (failure {failures}), waiting {wait_time:.0f}s"
@@ -480,7 +489,9 @@ class RoomServer:
             try:
                 # Update client sync state with pending ACK. Done under the lock
                 # so the ACK-timeout clock starts when the send actually begins,
-                # not before the inter-message gap has elapsed.
+                # not before the inter-message gap has elapsed. last_activity is
+                # left alone: a push attempt is not contact, and refreshing it
+                # here kept an unreachable client "active" forever.
                 self.db.upsert_client_sync(
                     room_hash=f"0x{self.room_hash:02X}",
                     client_pubkey=client_info.id.get_public_key().hex(),
@@ -488,7 +499,6 @@ class RoomServer:
                     pending_ack_crc=expected_ack_crc,
                     push_post_timestamp=post["post_timestamp"],
                     ack_timeout_time=time.time() + ack_timeout,
-                    last_activity=time.time(),
                 )
                 # Send and wait for the client's delivery ACK. The injector must
                 # be told the crypto ACK CRC we computed above — its default
@@ -519,8 +529,14 @@ class RoomServer:
                 await self._handle_ack_timeout(client_info.id.get_public_key())
                 logger.warning(
                     f"Room '{self.room_name}': Push to "
-                    f"0x{client_info.id.get_public_key()[0]:02X} timed out"
+                    f"0x{client_info.id.get_public_key()[0]:02X} via {route_type.upper()} timed out"
                 )
+                if route_type == "direct":
+                    # The stored path may be stale (a hop moved or went down).
+                    # Forget it so the retry floods; the client's PATH reply to
+                    # a flooded message gives us a fresh route.
+                    client_info.out_path_len = -1
+                    client_info.out_path = bytearray()
 
             return success
 
@@ -593,7 +609,6 @@ class RoomServer:
 
             for sync_state in all_sync_states:
                 client_pubkey_hex = sync_state["client_pubkey"]
-                push_failures = sync_state.get("push_failures", 0)
                 last_activity = sync_state.get("last_activity", 0)
 
                 # Skip already-evicted clients (marked with last_activity=0)
@@ -603,15 +618,12 @@ class RoomServer:
                 evict = False
                 reason = ""
 
-                # Check max failures
-                if push_failures >= MAX_PUSH_FAILURES:
+                # Failed pushes alone never evict: the client stays in backoff
+                # and is retried (firmware pauses it the same way, it does not
+                # drop it). Only a long stretch without contact evicts.
+                if now - last_activity > INACTIVE_CLIENT_TIMEOUT:
                     evict = True
-                    reason = f"max failures ({push_failures})"
-
-                # Check inactivity timeout
-                elif now - last_activity > INACTIVE_CLIENT_TIMEOUT:
-                    evict = True
-                    reason = f"inactive for {(now - last_activity) / 60:.0f} minutes"
+                    reason = f"inactive for {(now - last_activity) / 3600:.0f} hours"
 
                 if evict:
                     # Remove from database
@@ -725,11 +737,10 @@ class RoomServer:
                         client_pubkey=client.id.get_public_key().hex(),
                     )
 
-                    # Skip if already waiting for ACK, evicted, or max failures
+                    # Skip if already waiting for ACK, evicted, or in retry backoff
                     if sync_state:
                         pending_ack = sync_state.get("pending_ack_crc", 0)
                         last_activity = sync_state.get("last_activity", 0)
-                        push_failures = sync_state.get("push_failures", 0)
 
                         if pending_ack != 0:
                             logger.debug(
@@ -743,9 +754,12 @@ class RoomServer:
                             )
                             continue
 
-                        if push_failures >= MAX_PUSH_FAILURES:
+                        # Checked here as well as in push_post_to_client so a
+                        # client waiting out its backoff does not use up this
+                        # round's push slot.
+                        if self._backoff_remaining(sync_state) > 0:
                             logger.debug(
-                                f"Skipping client 0x{client.id.get_public_key()[0]:02X} (max failures)"
+                                f"Skipping client 0x{client.id.get_public_key()[0]:02X} (in backoff)"
                             )
                             continue
 
