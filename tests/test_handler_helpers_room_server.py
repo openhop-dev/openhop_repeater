@@ -62,6 +62,7 @@ class _FakeDB:
         self.get_all_room_clients = MagicMock(return_value=[])
         self.get_unsynced_messages = MagicMock(return_value=[])
         self.cleanup_old_messages = MagicMock(return_value=0)
+        self.get_room_messages = MagicMock(return_value=[])
 
 
 def _make_room_server(db=None, acl=None, injector=None, max_posts=8):
@@ -991,3 +992,33 @@ async def test_global_rate_limiter_releases_lock_on_send_exception():
     # The lock is reusable immediately afterwards.
     await limiter.acquire()
     limiter.release()
+
+
+@pytest.mark.asyncio
+async def test_post_timestamps_are_unique_whole_seconds_after_the_last_post():
+    """Firmware getCurrentTimeUnique(): whole seconds, strictly increasing, and
+    after the newest stored post (which may be a legacy fractional value)."""
+    db = _FakeDB()
+    db.get_room_messages.return_value = [{"post_timestamp": 2_000_000_000.75}]
+    rs = _make_room_server(db=db)
+
+    with patch("repeater.handler_helpers.room_server.time.time", return_value=1_000.5):
+        for author in (b"W", b"X", b"Y"):
+            assert await rs.add_post(author * 32, "hi", sender_timestamp=1) is True
+
+    stamps = [c.kwargs["post_timestamp"] for c in db.insert_room_message.call_args_list]
+    assert stamps == [2_000_000_001, 2_000_000_002, 2_000_000_003]
+    assert all(isinstance(t, int) for t in stamps)
+    db.get_room_messages.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_post_timestamp_follows_the_clock_when_it_is_ahead():
+    db = _FakeDB()
+    db.get_room_messages.return_value = [{"post_timestamp": 500.2}]
+    rs = _make_room_server(db=db)
+
+    with patch("repeater.handler_helpers.room_server.time.time", return_value=9_000.9):
+        assert await rs.add_post(b"Z" * 32, "hi", sender_timestamp=1) is True
+
+    assert db.insert_room_message.call_args.kwargs["post_timestamp"] == 9_000

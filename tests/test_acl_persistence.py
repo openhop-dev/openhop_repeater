@@ -1665,3 +1665,32 @@ def test_never_stored_evictions_are_not_queued_for_deletion(db):
     for _ in range(30):
         assert _login(acl, LocalIdentity(), "adminpw", 1) == (True, PERM_ACL_ADMIN)
     assert acl._pending_evictions == {}
+
+
+def test_unsynced_posts_compare_in_whole_seconds(db):
+    """A client logs in with the uint32 wire timestamp of its newest post as
+    sync_since. A legacy fractional post_timestamp in that same second must
+    count as already synced, or it is re-pushed after every login."""
+    db.insert_room_message(
+        room_hash="0x4D",
+        author_pubkey="aa" * 32,
+        message_text="older, fractional",
+        post_timestamp=1_793_671_469.263,
+        sender_timestamp=0,
+        txt_type=0,
+    )
+    db.insert_room_message(
+        room_hash="0x4D",
+        author_pubkey="aa" * 32,
+        message_text="newer",
+        post_timestamp=1_793_671_470,
+        sender_timestamp=0,
+        txt_type=0,
+    )
+    client = "bb" * 32
+
+    unsynced = db.get_unsynced_messages("0x4D", client, sync_since=1_793_671_469)
+    assert [m["message_text"] for m in unsynced] == ["newer"]
+    assert db.get_unsynced_count("0x4D", client, sync_since=1_793_671_469) == 1
+    assert db.get_unsynced_count("0x4D", client, sync_since=1_793_671_468) == 2
+    assert db.get_unsynced_count("0x4D", client, sync_since=1_793_671_470) == 0

@@ -219,6 +219,9 @@ class RoomServer:
             max_posts = MAX_UNSYNCED_POSTS
         self.max_posts = max_posts
 
+        # Last post_timestamp handed out; loaded from the database on first use.
+        self._last_post_timestamp = None
+
         # Round-robin state
         self.next_client_idx = 0
         self.next_push_time = 0
@@ -310,8 +313,8 @@ class RoomServer:
             # Record this post time
             self.client_post_times[client_key].append(now)
 
-            # Use our RTC time for post_timestamp
-            post_timestamp = time.time()
+            # Use our RTC time for post_timestamp, in unique whole seconds
+            post_timestamp = self._next_post_timestamp()
 
             # Store to database
             msg_id = self.db.insert_room_message(
@@ -362,6 +365,26 @@ class RoomServer:
         except Exception as e:
             logger.error(f"Error adding post: {e}", exc_info=True)
             return False
+
+    def _next_post_timestamp(self) -> int:
+        """Whole-second post timestamp, strictly after the room's last post.
+
+        Matches firmware getCurrentTimeUnique(). The wire carries the timestamp
+        as a uint32 and clients log in with the last one they received as
+        sync_since, so a fractional stored value made that post look newer
+        than the client's sync_since and it was re-pushed after every login.
+        """
+        if self._last_post_timestamp is None:
+            self._last_post_timestamp = 0
+            try:
+                latest = self.db.get_room_messages(f"0x{self.room_hash:02X}", limit=1)
+                if latest:
+                    self._last_post_timestamp = int(latest[0]["post_timestamp"])
+            except Exception as e:
+                logger.warning(f"Room '{self.room_name}': could not read last post time: {e}")
+        ts = max(int(time.time()), self._last_post_timestamp + 1)
+        self._last_post_timestamp = ts
+        return ts
 
     @staticmethod
     def _backoff_remaining(sync_state: Dict) -> float:
