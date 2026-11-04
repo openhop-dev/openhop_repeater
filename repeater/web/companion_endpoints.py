@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 import cherrypy
 from openhop_core.companion.constants import DEFAULT_OFFLINE_QUEUE_SIZE
+from openhop_core.protocol.constants import TXT_TYPE_CLI_COMMAND, TXT_TYPE_CLI_DATA
 
 from repeater.companion.utils import (
     trim_companion_contacts_to_fit,
@@ -494,7 +495,7 @@ class CompanionAPIEndpoints:
     @cherrypy.tools.json_out()
     @require_auth
     def send_text(self, **kwargs):
-        """POST /api/companion/send_text  {pub_key, text, txt_type?, companion_name?}"""
+        """POST /api/companion/send_text  {pub_key, text, txt_type?, attempt?, timestamp?, companion_name?}"""
         self._require_post()
         body = self._get_json_body()
         bridge = self._get_bridge(**self._resolve_bridge_params(body))
@@ -503,7 +504,34 @@ class CompanionAPIEndpoints:
         if not text:
             raise cherrypy.HTTPError(400, "text required")
         txt_type = int(body.get("txt_type", 0))
-        result = self._run_async(bridge.send_text_message(pub_key, text, txt_type=txt_type))
+        # A client retrying a message sends its timestamp and the next attempt,
+        # as CMD_SEND_TXT_MSG carries them.
+        send_args = {}
+        attempt = body.get("attempt")
+        if attempt is not None:
+            try:
+                attempt = int(attempt)
+            except (TypeError, ValueError):
+                raise cherrypy.HTTPError(400, "attempt must be an integer from 0 to 255")
+            if not 0 <= attempt <= 0xFF:
+                raise cherrypy.HTTPError(400, "attempt must be an integer from 0 to 255")
+            send_args["attempt"] = attempt
+        timestamp = body.get("timestamp")
+        if timestamp is not None:
+            try:
+                timestamp = int(timestamp)
+            except (TypeError, ValueError):
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            if not 0 <= timestamp <= 0xFFFFFFFF:
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            # As the frame server (_cmd_send_txt_msg): 0 means none was given, and
+            # the CLI types take a fresh one, as firmware stamps those with its RTC
+            # (MyMesh.cpp CMD_SEND_TXT_MSG, companion-v1.18.0).
+            if timestamp != 0 and txt_type not in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND):
+                send_args["timestamp"] = timestamp
+        result = self._run_async(
+            bridge.send_text_message(pub_key, text, txt_type=txt_type, **send_args)
+        )
         return self._success(
             {
                 "sent": result.success,
