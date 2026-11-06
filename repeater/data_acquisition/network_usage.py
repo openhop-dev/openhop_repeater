@@ -199,9 +199,11 @@ class NetworkUsageCollector:
             if self._thread.is_alive():
                 self.error = "Usage collector shutdown incomplete"
 
-    def snapshot(self, days) -> dict:
+    def snapshot(self, days=1, *, hours=None) -> dict:
+        if hours is None:
+            hours = days * 24
         end = int(self.clock() // 60) * 60
-        start = end - days * 86400
+        start = end - hours * 3600
         rows, first, covered, names = self.database.get_usage_snapshot(start, end)
         interfaces = [
             {**{k: v for k, v in r.items() if k != "kind"}, "name": r["source"]}
@@ -219,12 +221,13 @@ class NetworkUsageCollector:
             if r["kind"] == "mqtt"
         ]
         return {
-            "days": days,
+            "hours": hours,
+            "days": hours / 24,
             "start": start,
             "end": end,
             "bucket_seconds": 60,
             "available_since": first,
-            "partial": covered != days * 1440,
+            "partial": covered != hours * 60,
             "scope": "Current network namespace (container-visible when containerized); interfaces overlap; MQTT is locally accepted payload bytes, not transport bytes or broker receipt",
             "interfaces": interfaces,
             "mqtt": {

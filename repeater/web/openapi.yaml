@@ -733,10 +733,23 @@ paths:
         resets, interface changes, delayed/failed sampling and dropped pending data
         leave partial history. Empty MQTT rows mean zero only when partial is false.
         Values are persisted only, normally lagging collection by up to ten seconds.
+        Windows are rolling durations, defaulting to 24 hours. Specify hours or the
+        deprecated days parameter, never both. No history reset or migration is needed.
       parameters:
+        - name: hours
+          in: query
+          required: false
+          description: Rolling duration in hours; defaults to 24 when neither parameter is supplied.
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 168
         - name: days
           in: query
           required: false
+          deprecated: true
+          description: Legacy rolling duration in days; mutually exclusive with hours.
           schema:
             type: integer
             default: 1
@@ -750,7 +763,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NetworkUsage'
         '400':
-          description: days must be an integer between 1 and 7
+          description: Invalid hours (integer 1–168), invalid days (integer 1–7), or both parameters supplied
           content:
             application/json:
               schema:
@@ -6015,12 +6028,18 @@ components:
           minimum: 0
     NetworkUsage:
       type: object
-      required: [days, start, end, bucket_seconds, available_since, partial, scope, interfaces, mqtt, collection]
+      required: [hours, days, start, end, bucket_seconds, available_since, partial, scope, interfaces, mqtt, collection]
       properties:
-        days:
+        hours:
           type: integer
           minimum: 1
+          maximum: 168
+          description: Effective rolling duration in hours.
+        days:
+          type: number
+          minimum: 0.041666666666666664
           maximum: 7
+          description: Compatibility duration equal to hours / 24; fractional for subday windows.
         start:
           type: number
           description: Inclusive effective UNIX seconds, minute aligned.

@@ -153,6 +153,36 @@ def test_coverage_persists_quiet_minutes_and_marks_restart_gap(tmp_path):
     assert restarted.snapshot(1)["partial"] is True
 
 
+def test_hour_snapshot_uses_subday_bounds_and_coverage(tmp_path):
+    db = SQLiteHandler(tmp_path)
+    collector = NetworkUsageCollector(db, clock=lambda: 86519, counters=dict)
+    start, end = 82860, 86460
+    db.store_usage_buckets(
+        [
+            {
+                "kind": "interface",
+                "source": "eth0",
+                "bucket": bucket,
+                "upload_bytes": amount,
+                "download_bytes": amount * 2,
+                "messages": 0,
+            }
+            for bucket, amount in [(start - 60, 100), (start, 3), (end - 60, 4), (end, 200)]
+        ]
+    )
+    db.store_usage_batch("coverage", [], {}, list(range(start, end, 60)), end)
+    report = collector.snapshot(hours=1)
+    assert report["hours"] == 1
+    assert report["days"] == 1 / 24
+    assert (report["start"], report["end"]) == (start, end)
+    assert report["interfaces"][0]["upload_bytes"] == 7
+    assert report["interfaces"][0]["download_bytes"] == 14
+    assert report["partial"] is False
+    assert collector.snapshot()["hours"] == 24
+    assert collector.snapshot()["partial"] is True
+    assert collector.snapshot(2)["hours"] == 48
+
+
 def test_worker_shutdown_flushes_and_reclaims_thread(tmp_path):
     from repeater.data_acquisition.network_usage import NetworkUsageCollector
 

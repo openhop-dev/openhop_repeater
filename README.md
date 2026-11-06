@@ -62,7 +62,8 @@ Historical statistics and performance metrics.
 ## Network and MQTT usage
 
 The matching RepeaterUI feature adds **Network and MQTT usage** to the existing
-**System Stats** page. Select a rolling 1–7-day window and one network interface
+**System Stats** page. Select a rolling 1-hour, 6-hour, 24-hour (default), 2-day or
+1-week window and one network interface
 to see upload/download totals. MQTT lists locally accepted published payload
 bytes and messages per broker, plus the combined total. Display units scale as
 **B, KB, MB, GB** (decimal bytes, not bits).
@@ -71,7 +72,13 @@ History is collected automatically while Repeater runs and stored as minute
 buckets in the existing `repeater.db`, retaining eight days. The current minute
 is excluded; allow up to two minutes after first startup for complete-minute
 history to appear. No Prometheus installation is required. The authenticated
-read-only API is `GET /api/network_usage?days=1` (`days`: 1–7).
+read-only API is `GET /api/network_usage?hours=24` (`hours`: integer 1–168).
+All windows are rolling durations, not calendar periods; omitting the duration
+defaults to 24 hours. The legacy `days` query (integer 1–7) remains supported but
+is deprecated; supplying both `hours` and `days` returns HTTP 400. Responses
+include integer `hours` and compatibility `days = hours / 24` (fractional for
+subday windows). Bounds remain minute-aligned and half-open, excluding the
+current minute. Existing history is reused without a reset or schema migration.
 
 - Interface usage covers the visible network namespace: a Docker/LXC install
   measures container-visible traffic, not the entire physical host. Select the
