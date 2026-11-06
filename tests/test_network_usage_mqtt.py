@@ -1,6 +1,7 @@
 """Accounting at the real local Paho handoff (no broker/network connections)."""
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -106,7 +107,7 @@ def test_session_snapshot_cannot_read_between_message_and_byte_updates(tmp_path)
             assert halfway.wait(2)
             reader = pool.submit(read_snapshot)
             assert reading.wait(2)
-            with pytest.raises(TimeoutError):
+            with pytest.raises(FutureTimeoutError):
                 reader.result(timeout=0.05)
         finally:
             release.set()
