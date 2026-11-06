@@ -1914,11 +1914,13 @@ def test_check_pymc_console_and_mqtt_status_and_broker_presets(cherrypy_ctx):
         is_connected=lambda: True,
         has_pending_reconnect=lambda: False,
         format="json",
+        sent={"messages": 2, "payload_bytes": 1200},
     )
     _attach_storage(api, SimpleNamespace(mqtt_handler=SimpleNamespace(connections=[conn])))
     status2 = api.mqtt_status()
     assert status2["success"] is True
     assert status2["data"]["brokers"][0]["name"] == "main"
+    assert status2["data"]["brokers"][0]["sent"] == {"messages": 2, "payload_bytes": 1200}
 
     with (
         patch("repeater.presets.list_presets", return_value=["waev"]),

@@ -2755,6 +2755,7 @@ class APIEndpoints:
                             },
                             "format": conn.format,
                             "neighbors": getattr(conn, "neighbors_enabled", False),
+                            "sent": dict(conn.sent),
                         }
                     )
 
