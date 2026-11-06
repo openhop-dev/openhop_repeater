@@ -785,10 +785,67 @@ class SQLiteHandler:
                 rows,
             )
 
+    def store_usage_batch(self, batch_id, rows, names, coverage, timestamp):
+        """Replay-safe collector transaction; receipt and increments commit together."""
+        with self._connect() as conn:
+            if not conn.execute(
+                "INSERT OR IGNORE INTO network_usage_batches(id, timestamp) VALUES (?, ?)",
+                (batch_id, timestamp),
+            ).rowcount:
+                return
+            conn.executemany(
+                """INSERT INTO network_usage
+                (bucket, kind, source, upload_bytes, download_bytes, messages)
+                VALUES (:bucket, :kind, :source, :upload_bytes, :download_bytes, :messages)
+                ON CONFLICT(kind, source, bucket) DO UPDATE SET
+                upload_bytes=upload_bytes+excluded.upload_bytes,
+                download_bytes=download_bytes+excluded.download_bytes,
+                messages=messages+excluded.messages""",
+                rows,
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO network_usage_names(kind, source, name) VALUES (?, ?, ?)",
+                [(kind, source, name) for (kind, source), name in names.items()],
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO network_usage_coverage(bucket) VALUES (?)",
+                [(bucket,) for bucket in coverage],
+            )
+
+    def get_usage_snapshot(self, start: int, end: int):
+        """Read totals, coverage and labels from one WAL snapshot during concurrent flushes."""
+        with self._connect() as conn:
+            # sqlite3's implicit transactions begin on writes, not SELECTs.
+            # An explicit BEGIN keeps all three reads on the same snapshot.
+            conn.execute("BEGIN")
+            rows = self.get_usage_totals(start, end)
+            first, covered, names = self.get_usage_coverage(start, end)
+            return rows, first, covered, names
+
+    def get_usage_coverage(self, start, end):
+        conn = self._connect()
+        first = conn.execute("SELECT MIN(bucket) FROM network_usage_coverage").fetchone()[0]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM network_usage_coverage WHERE bucket >= ? AND bucket < ?",
+            (start, end),
+        ).fetchone()[0]
+        names = {
+            (kind, source): name
+            for kind, source, name in conn.execute(
+                "SELECT kind, source, name FROM network_usage_names"
+            )
+        }
+        return first, count, names
+
     def prune_usage_before(self, cutoff: int) -> None:
         """Delete expired usage buckets independently of packet-history retention."""
         with self._connect() as conn:
             conn.execute("DELETE FROM network_usage WHERE bucket < ?", (cutoff,))
+            conn.execute("DELETE FROM network_usage_coverage WHERE bucket < ?", (cutoff,))
+            conn.execute("DELETE FROM network_usage_batches WHERE timestamp < ?", (cutoff,))
+            conn.execute("""DELETE FROM network_usage_names WHERE NOT EXISTS
+                (SELECT 1 FROM network_usage u WHERE u.kind=network_usage_names.kind
+                 AND u.source=network_usage_names.source)""")
 
     def get_usage_totals(self, start: int, end: int) -> list:
         """Return source totals for minute buckets in the half-open [start, end) range."""
@@ -832,6 +889,18 @@ class SQLiteHandler:
     def _init_database(self):
         try:
             with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_batches (id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_network_usage_batches_time ON network_usage_batches(timestamp)"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_names (kind TEXT, source TEXT, name TEXT, PRIMARY KEY(kind, source))"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_coverage (bucket INTEGER PRIMARY KEY)"
+                )
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS network_usage (
                         bucket INTEGER NOT NULL CHECK(typeof(bucket) = 'integer'

@@ -195,7 +195,12 @@ class _BrokerConnection:
         node_name: str,
         on_connect_callback: Optional[Callable] = None,
         on_disconnect_callback: Optional[Callable] = None,
+        usage_recorder: Callable | None = None,
     ):
+        from .network_usage import broker_identity
+
+        self._usage_recorder = usage_recorder
+        self._usage_source = broker_identity(broker)
         self.broker = broker
         self.local_identity = local_identity
         self.public_key = public_key.upper()
@@ -570,6 +575,8 @@ class _BrokerConnection:
         )
         if self._running:
             result = self.client.publish(full_topic, payload, retain=retain, qos=qos)
+            if getattr(result, "rc", None) == mqtt.MQTT_ERR_SUCCESS and self._usage_recorder:
+                self._usage_recorder(self._usage_source, self.broker.get("name", "MQTT"), payload)
             return result
         else:
             logger.warning(f"Cannot publish to {self.broker['name']} - not connected")
@@ -643,6 +650,7 @@ class MeshCoreToMqttPusher:
         jwt_expiry_minutes: int = 10,
         stats_provider: Optional[Callable[[], dict]] = None,
         radio_stats_provider: Optional[Callable[[], dict]] = None,
+        usage_recorder: Callable | None = None,
     ):
         self.config = config
         # Store local identity and get public key
@@ -758,6 +766,7 @@ class MeshCoreToMqttPusher:
                 node_name=self.node_name,
                 on_connect_callback=self._on_broker_connected,
                 on_disconnect_callback=self._on_broker_disconnected,
+                usage_recorder=usage_recorder,
             )
             self.connections.append(conn)
 

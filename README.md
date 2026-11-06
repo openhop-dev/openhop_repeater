@@ -59,6 +59,38 @@ Real-time packet statistics, neighbor discovery, and system status.
 
 Historical statistics and performance metrics.
 
+## Network and MQTT usage
+
+The matching RepeaterUI feature adds **Network and MQTT usage** to the existing
+**System Stats** page. Select a rolling 1–7-day window and one network interface
+to see upload/download totals. MQTT lists locally accepted published payload
+bytes and messages per broker, plus the combined total. Display units scale as
+**B, KB, MB, GB** (decimal bytes, not bits).
+
+History is collected automatically while Repeater runs and stored as minute
+buckets in the existing `repeater.db`, retaining eight days. The current minute
+is excluded; allow up to two minutes after first startup for complete-minute
+history to appear. No Prometheus installation is required. The authenticated
+read-only API is `GET /api/network_usage?days=1` (`days`: 1–7).
+
+- Interface usage covers the visible network namespace: a Docker/LXC install
+  measures container-visible traffic, not the entire physical host. Select the
+  uplink explicitly; adding bridge, VPN and physical interface totals can double
+  count the same traffic.
+- MQTT figures count UTF-8 payload bytes accepted by the local MQTT client,
+  including status updates, separately for each broker copy. They do not confirm
+  broker receipt or include protocol/TLS/TCP overhead and retransmissions. Glass
+  MQTT telemetry is listed separately when enabled. Renaming a broker starts a
+  new usage source; retained history remains visible.
+- Partial windows are marked. Repeater downtime is not backfilled; counter
+  resets/reappearing interfaces establish a fresh baseline. Abrupt process loss
+  can lose unflushed samples, and prolonged database failure discards bounded
+  pending data rather than retaining an unlimited queue.
+
+These figures help estimate a mobile-data allowance; the carrier/router meter
+remains the billing cross-check. Existing packet history cannot reconstruct
+usage before this feature began collecting it.
+
 ## Supported Hardware
 
 openHop Repeater supports these radio backends:

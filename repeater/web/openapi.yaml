@@ -708,6 +708,64 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /network_usage:
+    get:
+      tags: [System]
+      summary: Get measured network and MQTT usage
+      operationId: getNetworkUsage
+      servers:
+        - url: /api
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      description: >-
+        Persisted minute-resolution deltas in the current network namespace, retained
+        for eight days. Container deployments measure container-visible interfaces,
+        not whole-host traffic. Interfaces overlap (bridges, tunnels, loopback and
+        physical uplinks); select an interface rather than summing them. MQTT totals
+        are UTF-8 payload bytes/messages accepted locally by Paho across broker and
+        legacy publishers (including Glass telemetry), not transport bytes, broker
+        receipts or carrier billing. Overall MQTT totals derive from the broker rows.
+        No backfill before collection started. In-progress minute is excluded; start
+        and end are effective minute-aligned UNIX seconds with a half-open range.
+        Interface deltas are attributed to the sample-ending minute. Full coverage
+        requires uninterrupted sampling across each minute; startup, restart, counter
+        resets, interface changes, delayed/failed sampling and dropped pending data
+        leave partial history. Empty MQTT rows mean zero only when partial is false.
+        Values are persisted only, normally lagging collection by up to ten seconds.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 7
+      responses:
+        '200':
+          description: Direct usage object (no success/data envelope)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkUsage'
+        '400':
+          description: days must be an integer between 1 and 7
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+        '405':
+          description: Only GET is supported
+        '503':
+          description: Usage history unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /packet_stats:
     get:
       tags: [Packets]
@@ -5913,6 +5971,109 @@ components:
                 type: string
                 enum: [unknown]
   schemas:
+
+    NetworkUsageInterface:
+      type: object
+      required: [source, name, upload_bytes, download_bytes, messages]
+      properties:
+        source:
+          type: string
+          description: Interface name in the current network namespace.
+        name:
+          type: string
+        upload_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        download_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        messages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Always zero for interface counters.
+    NetworkUsageBroker:
+      type: object
+      required: [source, name, upload_bytes, messages]
+      properties:
+        source:
+          type: string
+          description: Opaque hash of nonsecret endpoint identity and broker name; independent of broker list ordering and credentials. Renaming a broker starts a new source.
+        name:
+          type: string
+          description: Configured broker label (Glass telemetry has its own label).
+        upload_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Locally accepted payload bytes only; not transport bytes or broker acknowledgement.
+        messages:
+          type: integer
+          format: int64
+          minimum: 0
+    NetworkUsage:
+      type: object
+      required: [days, start, end, bucket_seconds, available_since, partial, scope, interfaces, mqtt, collection]
+      properties:
+        days:
+          type: integer
+          minimum: 1
+          maximum: 7
+        start:
+          type: number
+          description: Inclusive effective UNIX seconds, minute aligned.
+        end:
+          type: number
+          description: Exclusive effective UNIX seconds, minute aligned; excludes current minute.
+        bucket_seconds:
+          type: integer
+          enum: [60]
+        available_since:
+          type: number
+          nullable: true
+          description: Earliest retained fully observed minute, not a guarantee of continuous coverage after that point. Null until one full minute is recorded.
+        partial:
+          type: boolean
+          description: True if any requested minute lacks certified collection coverage. Partial totals are observed lower bounds, not zero-filled estimates.
+        scope:
+          type: string
+        interfaces:
+          type: array
+          description: Observed sources separately; do not sum overlapping interfaces automatically.
+          items:
+            $ref: '#/components/schemas/NetworkUsageInterface'
+        mqtt:
+          type: object
+          required: [brokers, upload_bytes, messages]
+          properties:
+            brokers:
+              type: array
+              items:
+                $ref: '#/components/schemas/NetworkUsageBroker'
+            upload_bytes:
+              type: integer
+              format: int64
+              minimum: 0
+            messages:
+              type: integer
+              format: int64
+              minimum: 0
+        collection:
+          type: object
+          required: [running, last_sample, error]
+          properties:
+            running:
+              type: boolean
+            last_sample:
+              type: number
+              nullable: true
+              description: Last successful interface sample UNIX seconds; null before first success.
+            error:
+              type: string
+              nullable: true
+              description: Sanitized collection/persistence error, never connection details or credentials.
 
     SensorMetricDescriptor:
       type: object

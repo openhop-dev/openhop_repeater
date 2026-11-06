@@ -3922,6 +3922,23 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    def network_usage(self, days=1):
+        """Persisted complete-minute usage; available only below authenticated /api."""
+        if cherrypy.request.method != "GET":
+            cherrypy.response.headers["Allow"] = "GET"
+            cherrypy.response.status = 405
+            return self._error("Method not allowed. This endpoint requires GET.")
+        if str(days) not in {str(value) for value in range(1, 8)}:
+            cherrypy.response.status = 400
+            return self._error("days must be an integer between 1 and 7")
+        try:
+            return self._get_storage().network_usage.snapshot(int(days))
+        except Exception:  # noqa: BLE001 - never expose storage exception details
+            cherrypy.response.status = 503
+            return self._error("Network usage history unavailable")
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
     def packet_stats(self, hours=24):
         try:
             hours = int(hours)
