@@ -270,6 +270,9 @@ class _BrokerConnection:
         # below for the same hazard. This is the openhop equivalent of the
         # firmware's packets-only MeshRank exclusion.
         self.neighbors_enabled = bool(broker.get("neighbors", False))
+        # Payload bytes paho accepted since the service started; topic, protocol overhead,
+        # keepalives and resends are not counted. Callers of publish() hold the pusher's _lock.
+        self.sent = {"messages": 0, "payload_bytes": 0}
 
         self._tls_verified = False
 
@@ -569,14 +572,18 @@ class _BrokerConnection:
             qos = 1 if self.retain_status else 0
 
         full_topic = f"{self.base_topic}/{subtopic}"
+        size = len(payload.encode("utf-8"))
         _trace(
-            f"Publishing topic='{_truncate_middle(full_topic)}', bytes={len(payload.encode('utf-8'))}, "
+            f"Publishing topic='{_truncate_middle(full_topic)}', bytes={size}, "
             f"running={self._running}, retain={retain}, qos={qos}"
         )
         if self._running:
             result = self.client.publish(full_topic, payload, retain=retain, qos=qos)
-            if getattr(result, "rc", None) == mqtt.MQTT_ERR_SUCCESS and self._usage_recorder:
-                self._usage_recorder(self._usage_source, self.broker.get("name", "MQTT"), payload)
+            if getattr(result, "rc", None) == mqtt.MQTT_ERR_SUCCESS:
+                self.sent["messages"] += 1
+                self.sent["payload_bytes"] += size
+                if self._usage_recorder:
+                    self._usage_recorder(self._usage_source, self.broker.get("name", "MQTT"), payload)
             return result
         else:
             logger.warning(f"Cannot publish to {self.broker['name']} - not connected")
