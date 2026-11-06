@@ -4149,6 +4149,7 @@ paths:
     get:
       tags: [System]
       summary: Get MQTT runtime status
+      description: Per-broker sent counters are session-only and reset when the broker connection is recreated or the service restarts. They count locally accepted payload bytes, not confirmed delivery or network overhead. For persistent rolling totals, including Glass telemetry, use /network_usage.
       responses:
         '200':
           description: MQTT status
@@ -4156,6 +4157,41 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      handler_active:
+                        type: boolean
+                      brokers:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            name:
+                              type: string
+                            host:
+                              type: string
+                            format:
+                              type: string
+                            neighbors:
+                              type: boolean
+                            status:
+                              type: object
+                              properties:
+                                connected:
+                                  type: boolean
+                                reconnecting:
+                                  type: boolean
+                            sent:
+                              $ref: '#/components/schemas/MqttSentCounters'
+                      neighbors:
+                        type: object
+                        nullable: true
 
   /broker_presets:
     get:
@@ -6026,9 +6062,20 @@ components:
           type: integer
           format: int64
           minimum: 0
+    MqttSentCounters:
+      type: object
+      description: Locally accepted outgoing message counts and UTF-8 payload bytes for this broker connection. Reset on connection recreation or service restart, not on a normal reconnect. Excludes topics, protocol overhead, retries and Glass's separate client; accepted messages are not guaranteed delivered.
+      required: [messages, payload_bytes]
+      properties:
+        messages:
+          type: integer
+          minimum: 0
+        payload_bytes:
+          type: integer
+          minimum: 0
     NetworkUsage:
       type: object
-      required: [hours, days, start, end, bucket_seconds, available_since, partial, scope, interfaces, mqtt, collection]
+      required: [hours, days, start, end, bucket_seconds, available_since, partial, scope, interfaces, default_interface, mqtt, collection]
       properties:
         hours:
           type: integer
@@ -6058,6 +6105,10 @@ components:
           description: True if any requested minute lacks certified collection coverage. Partial totals are observed lower bounds, not zero-filled estimates.
         scope:
           type: string
+        default_interface:
+          type: string
+          nullable: true
+          description: Best-effort current Linux main-table default-route recommendation, equal to a returned interfaces source whose NIC is currently up and nonloopback. Null for unavailable discovery, ambiguous routes, differing IPv4/IPv6 defaults or no matching source. Not a policy-routing or carrier-billing determination. Use only for initial selection; never override a manual selection.
         interfaces:
           type: array
           description: Observed sources separately; do not sum overlapping interfaces automatically.

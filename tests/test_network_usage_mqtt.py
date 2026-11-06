@@ -1,6 +1,7 @@
 """Accounting at the real local Paho handoff (no broker/network connections)."""
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -53,6 +54,7 @@ def test_every_subtopic_accounts_only_local_accepted_utf8(tmp_path, legacy):
     totals = collector.database.get_usage_totals(0, 180)
     assert sum(row["upload_bytes"] for row in totals) == 8
     assert sum(row["messages"] for row in totals) == 4
+    assert conn.sent == {"messages": 4, "payload_bytes": 8}
 
 
 def test_concurrent_publishers_do_not_lose_deltas(tmp_path):
@@ -66,6 +68,50 @@ def test_concurrent_publishers_do_not_lose_deltas(tmp_path):
         list(pool.map(lambda _: conn.publish("packets", "é"), range(1000)))
     collector.flush()
     assert collector.database.get_usage_totals(0, 180)[0]["upload_bytes"] == 2000
+    assert conn.sent == {"messages": 1000, "payload_bytes": 2000}
+
+
+def test_session_sent_snapshot_is_a_copy(tmp_path):
+    collector = NetworkUsageCollector(SQLiteHandler(tmp_path), clock=lambda: 120)
+    conn = make_pusher(collector).connections[0]
+    snapshot = conn.sent
+    snapshot["messages"] = 99
+    assert conn.sent == {"messages": 0, "payload_bytes": 0}
+
+
+def test_session_snapshot_cannot_read_between_message_and_byte_updates(tmp_path):
+    collector = NetworkUsageCollector(SQLiteHandler(tmp_path), clock=lambda: 120)
+    conn = make_pusher(collector).connections[0]
+    halfway, release, reading = Event(), Event(), Event()
+
+    class PausingCounters(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if key == "messages":
+                halfway.set()
+                assert release.wait(2), "Writer was not released"
+
+    conn._sent = PausingCounters(conn.sent)
+    conn._running = True
+    conn.client = Mock()
+    conn.client.publish.return_value = SimpleNamespace(rc=0)
+
+    def read_snapshot():
+        reading.set()
+        return conn.sent
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(conn.publish, "status", "é")
+        try:
+            assert halfway.wait(2)
+            reader = pool.submit(read_snapshot)
+            assert reading.wait(2)
+            with pytest.raises(TimeoutError):
+                reader.result(timeout=0.05)
+        finally:
+            release.set()
+        writer.result(timeout=2)
+        assert reader.result(timeout=2) == {"messages": 1, "payload_bytes": 2}
 
 
 def test_glass_mqtt_payload_also_uses_local_acceptance(tmp_path):

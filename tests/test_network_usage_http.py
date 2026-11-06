@@ -58,7 +58,13 @@ def usage_http(monkeypatch, tmp_path):
             )
         ),
     )
-    collector = NetworkUsageCollector(SQLiteHandler(tmp_path), clock=lambda: 86400, counters=dict)
+    collector = NetworkUsageCollector(
+        SQLiteHandler(tmp_path),
+        clock=lambda: 86400,
+        counters=dict,
+        route_reader=lambda path, limit: "",
+        interface_stats=dict,
+    )
     storage = SimpleNamespace(network_usage=collector)
     api = APIEndpoints.__new__(APIEndpoints)
     api.daemon_instance = SimpleNamespace(repeater_handler=SimpleNamespace(storage=storage))
@@ -114,9 +120,11 @@ def test_network_usage_authenticated_query_direct_contract(usage_http):
         "partial",
         "scope",
         "interfaces",
+        "default_interface",
         "mqtt",
         "collection",
     }
+    assert data["default_interface"] is None
     assert data["days"] == 1
     assert data["start"] == 0 and data["end"] == 86400
     assert data["interfaces"][0]["download_bytes"] == 22

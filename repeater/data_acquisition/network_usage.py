@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 
 import psutil
 
+from .default_route import default_interface
+
 
 def broker_name(value):
     """Labels may come from legacy endpoint strings; never retain URL credentials."""
@@ -37,7 +39,11 @@ class NetworkUsageCollector:
     RETENTION = 8 * 86400  # Seven complete days plus a day of rounding/retry margin.
     INTERVAL = 10
 
-    def __init__(self, database, *, clock=time.time, counters=None):
+    def __init__(
+        self, database, *, clock=time.time, counters=None, route_reader=None, interface_stats=None
+    ):
+        self.route_reader = route_reader
+        self.interface_stats = interface_stats
         self.database = database
         self.clock = clock
         self.counters = counters or (lambda: psutil.net_io_counters(pernic=True, nowrap=False))
@@ -230,6 +236,11 @@ class NetworkUsageCollector:
             "partial": covered != hours * 60,
             "scope": "Current network namespace (container-visible when containerized); interfaces overlap; MQTT is locally accepted payload bytes, not transport bytes or broker receipt",
             "interfaces": interfaces,
+            "default_interface": default_interface(
+                {row["source"] for row in interfaces},
+                route_reader=self.route_reader,
+                interface_stats=self.interface_stats,
+            ),
             "mqtt": {
                 "brokers": brokers,
                 "upload_bytes": sum(r["upload_bytes"] for r in brokers),

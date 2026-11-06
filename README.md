@@ -84,6 +84,27 @@ current minute. Existing history is reused without a reset or schema migration.
   measures container-visible traffic, not the entire physical host. Select the
   uplink explicitly; adding bridge, VPN and physical interface totals can double
   count the same traffic.
+- The API's nullable `default_interface` recommends the current default-route
+  interface only when it is a returned history source and its NIC is currently
+  up and non-loopback. Clients may use it for initial selection only, never to
+  override a manual choice. It is not chosen by traffic volume or NIC name.
+  Discovery reads Linux namespace `/proc/net/route` and `/proc/net/ipv6_route`
+  with a 256 KiB cap per file. It requires up, non-reject routes, selects the
+  minimum metric separately per family, and returns null for tied interfaces,
+  differing IPv4/IPv6 winners, source-specific defaults, active split-default
+  `/1` routes, malformed/unreadable/oversized tables, or unsupported platforms.
+  This is a best-effort main-table hint, not a complete policy-routing lookup:
+  source rules, additional routing tables and destination-specific VPN routing
+  can choose another interface. Check the uplink manually for those setups;
+  route and NIC state can also change immediately after discovery.
+- `/api/mqtt_status` also exposes Treehouse-00's compatible per-broker `sent`
+  object (`messages`, `payload_bytes`) for API clients that need current-session
+  counts. These reset when the connection object is recreated or the service
+  restarts, survive ordinary reconnects, and exclude Glass's separate client.
+  Both values are read atomically as one copied snapshot. They use the same
+  successful local-publish handoff as persistent history, not a second publish
+  or an extra addition to the rolling totals. Use `/api/network_usage` for the
+  selected rolling window, retained history and Glass totals.
 - MQTT figures count UTF-8 payload bytes accepted by the local MQTT client,
   including status updates, separately for each broker copy. They do not confirm
   broker receipt or include protocol/TLS/TCP overhead and retransmissions. Glass

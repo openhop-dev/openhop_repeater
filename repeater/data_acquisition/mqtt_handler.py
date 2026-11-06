@@ -272,7 +272,8 @@ class _BrokerConnection:
         self.neighbors_enabled = bool(broker.get("neighbors", False))
         # Payload bytes paho accepted since the service started; topic, protocol overhead,
         # keepalives and resends are not counted. Callers of publish() hold the pusher's _lock.
-        self.sent = {"messages": 0, "payload_bytes": 0}
+        self._sent_lock = threading.Lock()
+        self._sent = {"messages": 0, "payload_bytes": 0}
 
         self._tls_verified = False
 
@@ -580,10 +581,13 @@ class _BrokerConnection:
         if self._running:
             result = self.client.publish(full_topic, payload, retain=retain, qos=qos)
             if getattr(result, "rc", None) == mqtt.MQTT_ERR_SUCCESS:
-                self.sent["messages"] += 1
-                self.sent["payload_bytes"] += size
+                with self._sent_lock:
+                    self._sent["messages"] += 1
+                    self._sent["payload_bytes"] += size
                 if self._usage_recorder:
-                    self._usage_recorder(self._usage_source, self.broker.get("name", "MQTT"), payload)
+                    self._usage_recorder(
+                        self._usage_source, self.broker.get("name", "MQTT"), payload
+                    )
             return result
         else:
             logger.warning(f"Cannot publish to {self.broker['name']} - not connected")
@@ -592,6 +596,12 @@ class _BrokerConnection:
     def is_enabled(self) -> bool:
         """Check if connection is enabled"""
         return self.enabled
+
+    @property
+    def sent(self) -> dict:
+        """Consistent session counters; callers cannot mutate internal accounting."""
+        with self._sent_lock:
+            return dict(self._sent)
 
     def is_connected(self) -> bool:
         """Check if connection is active"""
