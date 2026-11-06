@@ -760,6 +760,51 @@ class SQLiteHandler:
             self._local.conn = conn
         return conn
 
+    def store_usage_buckets(self, buckets: list) -> None:
+        """Add a batch of minute deltas atomically; callers must not replay batches."""
+        rows = [
+            (
+                row["bucket"],
+                row["kind"],
+                row["source"],
+                row["upload_bytes"],
+                row["download_bytes"],
+                row["messages"],
+            )
+            for row in buckets
+        ]
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO network_usage
+                   (bucket, kind, source, upload_bytes, download_bytes, messages)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(kind, source, bucket) DO UPDATE SET
+                   upload_bytes = upload_bytes + excluded.upload_bytes,
+                   download_bytes = download_bytes + excluded.download_bytes,
+                   messages = messages + excluded.messages""",
+                rows,
+            )
+
+    def prune_usage_before(self, cutoff: int) -> None:
+        """Delete expired usage buckets independently of packet-history retention."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM network_usage WHERE bucket < ?", (cutoff,))
+
+    def get_usage_totals(self, start: int, end: int) -> list:
+        """Return source totals for minute buckets in the half-open [start, end) range."""
+        rows = (
+            self._connect()
+            .execute(
+                """SELECT kind, source, SUM(upload_bytes), SUM(download_bytes), SUM(messages)
+               FROM network_usage WHERE bucket >= ? AND bucket < ?
+               GROUP BY kind, source ORDER BY kind, source""",
+                (start, end),
+            )
+            .fetchall()
+        )
+        keys = ("kind", "source", "upload_bytes", "download_bytes", "messages")
+        return [dict(zip(keys, row)) for row in rows]
+
     def _invalidate_hot_caches(self) -> None:
         self._packet_stats_cache.clear()
         self._neighbors_cache = {"timestamp": 0.0, "value": None}
@@ -787,6 +832,24 @@ class SQLiteHandler:
     def _init_database(self):
         try:
             with self._connect() as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS network_usage (
+                        bucket INTEGER NOT NULL CHECK(typeof(bucket) = 'integer'
+                            AND bucket >= 0 AND bucket % 60 = 0),
+                        kind TEXT NOT NULL CHECK(kind IN ('interface', 'mqtt')),
+                        source TEXT NOT NULL CHECK(length(source) BETWEEN 1 AND 256),
+                        upload_bytes INTEGER NOT NULL CHECK(typeof(upload_bytes) = 'integer'
+                            AND upload_bytes >= 0),
+                        download_bytes INTEGER NOT NULL CHECK(typeof(download_bytes) = 'integer'
+                            AND download_bytes >= 0),
+                        messages INTEGER NOT NULL CHECK(typeof(messages) = 'integer'
+                            AND messages >= 0),
+                        PRIMARY KEY(kind, source, bucket)
+                    )"""
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_network_usage_bucket ON network_usage(bucket)"
+                )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS packets (
