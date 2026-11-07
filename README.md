@@ -550,11 +550,15 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 Pulling Git changes or restarting a container alone does not rebuild its image.
 The Dockerfile packages the frontend assets present in the build context; it does
-not fetch or build the default RepeaterUI. Frontend changes belong in
-[RepeaterUI](https://github.com/openhop-dev/openHop_RepeaterUI), using the matching
-UI branch (`feat-plugin-ui` for `feat-plugin-manager`). Stage the complete verified
-UI build for packaging; do not hand-edit generated JavaScript. Optional Console
-installation is managed through the plugin catalogue, independently of image builds.
+not fetch or build the default RepeaterUI. Native installs likewise package the
+compiled UI in this repository, not the standalone UI repository's current branch.
+Frontend source changes belong in
+[RepeaterUI](https://github.com/openhop-dev/openHop_RepeaterUI). Before distributing
+a matching backend, refresh and verify the complete compiled UI in a backend
+packaging PR. See [Bundling the default RepeaterUI](docs/frontend-packaging.md) for
+the build, provenance and real-wheel verification steps. Do not hand-edit generated
+JavaScript. Optional Console installation is managed through the plugin catalogue,
+independently of image builds.
 
 Back up both config and data volumes before upgrading. Do **not** use
 `docker compose down -v` if you want to retain configuration and plugins.
