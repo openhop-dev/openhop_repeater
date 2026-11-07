@@ -65,3 +65,17 @@ def test_a_bad_attempt_or_timestamp_is_rejected(field):
         _invoke(ep)
     assert exc_info.value.code == 400
     send.assert_not_awaited()
+
+
+def test_wait_for_ack_false_reaches_core():
+    ep, send = _endpoint({"wait_for_ack": False})
+    _invoke(ep)
+    send.assert_awaited_once_with(KEY, "hi", txt_type=0, wait_for_ack=False)
+
+
+@pytest.mark.parametrize("body", [{}, {"wait_for_ack": True}])
+def test_waiting_for_the_ack_is_the_default_and_answers_as_before(body):
+    ep, send = _endpoint(body)
+    answer = _invoke(ep)
+    send.assert_awaited_once_with(KEY, "hi", txt_type=0)
+    assert answer["data"] == {"sent": True, "is_flood": False, "expected_ack": 0x1234}
