@@ -4112,7 +4112,15 @@ class SQLiteHandler:
                     # Inside the transaction, so a row a companion queued before this
                     # purge is refused when it is written (companion_record_history).
                     self.history_generation += 1
-                conn.commit()
+                try:
+                    conn.commit()
+                except Exception:
+                    if table_name == "companion_messages":
+                        # Nothing was purged, so the rows queued before it are still
+                        # wanted. Restored before the rollback releases the write lock,
+                        # so no writer checks against the bumped value.
+                        self.history_generation -= 1
+                    raise
                 logger.info(f"Purged {result.rowcount} rows from {table_name}")
                 return result.rowcount
         except Exception as e:

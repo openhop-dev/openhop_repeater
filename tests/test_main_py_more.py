@@ -145,3 +145,24 @@ async def test_run_starts_http_and_handles_dispatcher_cancelled_gracefully():
 
     fake_http_instance.start.assert_called_once()
     daemon.dispatcher.run_forever.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_remove_companion_retires_a_bridge_that_can_retire():
+    daemon = RepeaterDaemon(_base_config(), radio=object())
+    daemon.identity_manager = IdentityManager({})
+    identity = _FakeLocalIdentity(b"\x30" * 32)
+    bridge = SimpleNamespace(
+        get_public_key=identity.get_public_key,
+        retire=AsyncMock(),
+        stop=AsyncMock(),
+        note_flood_copy=MagicMock(),
+    )
+    daemon.companion_bridges = {0x30: bridge}
+    daemon.companion_frame_servers = []
+    daemon.dispatcher = SimpleNamespace(remove_raw_packet_subscriber=MagicMock())
+
+    assert await daemon.remove_companion(identity.get_public_key().hex()) is True
+
+    bridge.retire.assert_awaited_once()
+    bridge.stop.assert_not_awaited()

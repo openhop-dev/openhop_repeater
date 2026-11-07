@@ -291,6 +291,47 @@ async def test_a_purge_also_drops_the_rows_still_queued(db, monkeypatch):
     ]
 
 
+class _CommitFails:
+    """A connection whose COMMIT fails, as on a disk error."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def commit(self):
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_purge_keeps_the_rows_queued_before_it(db, monkeypatch):
+    record, gate = db.companion_record_history, threading.Event()
+    monkeypatch.setattr(db, "companion_record_history", lambda *args: gate.wait() and record(*args))
+    bridge = _bridge(db)
+    await bridge._fire_callbacks("message_event", MessageEvent(_PEER_KEY, "queued", 1, 0))
+    await asyncio.sleep(0)
+
+    connect = db._connect
+    monkeypatch.setattr(db, "_connect", lambda: _CommitFails(connect()))
+    with pytest.raises(sqlite3.OperationalError):
+        db.purge_table("companion_messages")
+    monkeypatch.setattr(db, "_connect", connect)
+    gate.set()
+    await bridge.stop()
+
+    assert [m["text"] for m in db.companion_load_history(bridge.get_public_key(), 0, 10)] == [
+        "queued"
+    ]
+
+
 # The pin is openhop_core@dev, which reports sends once the Core change lands.
 _reports_sends = pytest.mark.skipif(
     not hasattr(RepeaterCompanionBridge, "on_message_sent"),
@@ -418,4 +459,22 @@ async def test_a_message_the_router_delivers_after_stop_is_still_recorded(db):
     assert [m["text"] for m in db.companion_load_history(bridge.get_public_key(), 0, 10)] == [
         "before",
         "after",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retire_flushes_then_ends_the_writer_and_records_nothing_more(db):
+    """A deleted companion's writer must not outlive it or restart on a late event."""
+    bridge = _bridge(db)
+    await bridge._fire_callbacks("message_event", MessageEvent(_PEER_KEY, "before", 1, 0))
+    writer = bridge._history_writer
+
+    await bridge.retire()
+
+    assert writer.done()
+    assert bridge._history_writer is None
+    await bridge._fire_callbacks("message_event", MessageEvent(_PEER_KEY, "after", 1, 0))
+    assert bridge._history_writer is None
+    assert [m["text"] for m in db.companion_load_history(bridge.get_public_key(), 0, 10)] == [
+        "before"
     ]

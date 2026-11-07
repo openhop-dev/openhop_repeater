@@ -1672,3 +1672,32 @@ class TestCompanionAckConfirmation(unittest.IsolatedAsyncioTestCase):
         await self._route(bridge, packet)
 
         self.assertEqual(confirmed, [])
+
+
+class TestFanOutWhileCompanionsChange(unittest.IsolatedAsyncioTestCase):
+    async def test_deleting_a_companion_mid_fan_out_does_not_end_delivery(self):
+        """The bridges dict can be the daemon's live one; a delete during an await
+        must not raise "dictionary changed size during iteration"."""
+        router = PacketRouter(_make_daemon())
+        bridges = {}
+        delivered = []
+
+        def bridge_that(action):
+            bridge = MagicMock()
+
+            async def process(packet):
+                delivered.append(bridge)
+                action()
+                return MagicMock(authenticated=False)
+
+            bridge.process_received_packet = process
+            return bridge
+
+        first = bridge_that(lambda: bridges.pop(0x02, None))
+        second = bridge_that(lambda: None)
+        bridges.update({0x01: first, 0x02: second})
+
+        result = await router._fan_out_to_bridges(_make_packet(), bridges, context="test")
+
+        self.assertTrue(result[0])
+        self.assertEqual(delivered, [first, second])

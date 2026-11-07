@@ -1161,7 +1161,9 @@ class RepeaterDaemon:
                     await server.stop()
             if self.dispatcher:
                 self.dispatcher.remove_raw_packet_subscriber(bridge.note_flood_copy)
-            await bridge.stop()
+            # retire() rather than stop(): it also ends the bridge's history writer.
+            retire = getattr(bridge, "retire", None)
+            await (retire() if callable(retire) else bridge.stop())
 
         if self.identity_manager:
             for name, (identity, _cfg, identity_type) in list(

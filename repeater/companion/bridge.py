@@ -94,6 +94,8 @@ class RepeaterCompanionBridge(CompanionBridge):
         # (a VACUUM, a purge): as many as the offline queue holds by default.
         self._history_queue: asyncio.Queue = asyncio.Queue(maxsize=512)
         self._history_writer: Optional[asyncio.Task] = None
+        # Set by retire(): the companion was deleted, so nothing more is recorded.
+        self._retired = False
         super().__init__(
             identity=identity,
             packet_injector=packet_injector,
@@ -178,6 +180,8 @@ class RepeaterCompanionBridge(CompanionBridge):
         carries the purge generation it was queued under, so a purge that
         overtakes it in the queue is not undone by its write.
         """
+        if self._retired:
+            return
         if self._history_writer is None:
             self._history_writer = asyncio.create_task(self._write_history())
         try:
@@ -218,6 +222,23 @@ class RepeaterCompanionBridge(CompanionBridge):
                 # The writer holds the row it is trying to write.
                 self._history_queue.qsize() + 1,
             )
+
+    async def retire(self) -> None:
+        """Stop for good, as when the companion is deleted.
+
+        stop() leaves the history writer running for the router's drain at
+        shutdown. A deleted companion gets no more messages, so after the same
+        flush its writer is ended, and an event that still arrives starts none.
+        """
+        await self.stop()
+        self._retired = True
+        writer, self._history_writer = self._history_writer, None
+        if writer is not None:
+            writer.cancel()
+            try:
+                await writer
+            except asyncio.CancelledError:
+                pass
 
     def _save_prefs(self) -> None:
         """Persist full NodePrefs as JSON to SQLite."""
