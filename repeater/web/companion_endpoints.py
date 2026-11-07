@@ -129,6 +129,16 @@ class CompanionAPIEndpoints:
         return result
 
     @staticmethod
+    def _packet_hash_field(result) -> dict:
+        """The sent packet's hash for a send's answer, once core reports it.
+
+        In the form the packet log keys a packet by, its first 16 hex characters
+        (engine.py, _build_packet_record), so it can go straight to packet_by_hash.
+        """
+        packet_hash = getattr(result, "packet_hash", None)
+        return {} if packet_hash is None else {"packet_hash": packet_hash.hex().upper()[:16]}
+
+    @staticmethod
     def _error(msg):
         return {"success": False, "error": str(msg)}
 
@@ -540,6 +550,7 @@ class CompanionAPIEndpoints:
                 "sent": result.success,
                 "is_flood": result.is_flood,
                 "expected_ack": result.expected_ack,
+                **self._packet_hash_field(result),
             }
         )
 
@@ -556,7 +567,7 @@ class CompanionAPIEndpoints:
         if not text:
             raise cherrypy.HTTPError(400, "text required")
         success = self._run_async(bridge.send_channel_message(channel_idx, text))
-        return self._success({"sent": bool(success)})
+        return self._success({"sent": bool(success), **self._packet_hash_field(success)})
 
     # ----- Login -----
 
