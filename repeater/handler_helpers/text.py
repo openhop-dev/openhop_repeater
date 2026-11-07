@@ -440,8 +440,21 @@ class TextHelper:
                     # Create a minimal contact object that TextMessageHandler needs
                     class ContactProxy:
                         def __init__(self, client):
+                            self._client = client
                             self.public_key = client.id.get_public_key().hex()
                             self.name = f"client_{self.public_key[:8]}"
+
+                        # The ACK for a direct message is routed on the client's
+                        # out_path. Without these the handler read the default -1
+                        # and flooded every ACK, even with a known path. Read
+                        # live, so a PATH update is seen at once.
+                        @property
+                        def out_path_len(self):
+                            return self._client.out_path_len
+
+                        @property
+                        def out_path(self):
+                            return self._client.out_path
 
                     contact_list.append(ContactProxy(client_info))
                 return contact_list
