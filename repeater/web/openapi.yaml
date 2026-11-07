@@ -6383,6 +6383,25 @@ components:
       type: object
       required: [available, supports, running, configured]
       properties:
+        radio_type:
+          type: string
+          nullable: true
+          description: Configured default radio type, stripped and lower-cased; null when absent
+        limits:
+          type: object
+          description: Probed control limits; absent keys have no known limits
+          properties:
+            agc_reset_interval_seconds:
+              type: object
+              description: AGC interval range and step in seconds, bounded by the host limit
+              required: [min, max, step]
+              properties:
+                min:
+                  type: integer
+                max:
+                  type: integer
+                step:
+                  type: integer
         available:
           type: boolean
           description: Default radio is a KISS or OpenHop modem with front-end controls

@@ -813,9 +813,7 @@ def test_agc_set_rejects_out_of_range_and_keeps_an_unchanged_zero():
     mgr.save_to_file.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "maximum, step, interval", [(1020, 4, 1200), (3600, 1, 3601), (777, 1, 778)]
-)
+@pytest.mark.parametrize("maximum, step, interval", [(1020, 4, 1200), (777, 1, 778)])
 def test_agc_set_reports_the_radio_range_without_sending(maximum, step, interval):
     radio = FakeKissRadio()
     radio.effective_agc_reset_interval = lambda seconds: (
@@ -827,6 +825,22 @@ def test_agc_set_reports_the_radio_range_without_sending(maximum, step, interval
     assert cli._cmd_set(f"agc.reset.interval {interval}") == (
         f"Error: AGC reset interval {interval} is outside this radio's range (0-{maximum} seconds)"
     )
+    radio.set_agc_reset_interval.assert_not_called()
+    mgr.save_to_file.assert_not_called()
+    assert cfg["repeater"]["agc_reset_interval"] == 8
+
+
+@pytest.mark.parametrize("maximum, interval", [(1020, -1), (3600, -1), (1020, 3601), (3600, 3601)])
+def test_agc_set_checks_host_range_before_radio_range(maximum, interval):
+    radio = FakeKissRadio()
+    radio.effective_agc_reset_interval = MagicMock(
+        side_effect=lambda s: s if 0 <= s <= maximum else None
+    )
+    radio.set_agc_reset_interval = MagicMock()
+    cli, cfg, mgr = _kiss_cli(radio)
+
+    assert cli._cmd_set(f"agc.reset.interval {interval}") == "Error: must be 0-3600"
+    radio.effective_agc_reset_interval.assert_not_called()
     radio.set_agc_reset_interval.assert_not_called()
     mgr.save_to_file.assert_not_called()
     assert cfg["repeater"]["agc_reset_interval"] == 8

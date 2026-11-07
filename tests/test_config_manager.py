@@ -6,6 +6,39 @@ from repeater.airtime import AirtimeBudgets, AirtimeManager
 from repeater.config_manager import ConfigManager
 
 
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        ({}, None),
+        ({"radio_type": None}, None),
+        ({"radio_type": " KISS "}, "kiss"),
+        ({"radio_type": " MODEM_USB "}, "modem_usb"),
+        ({"radio_type": "sx1262"}, "sx1262"),
+        (
+            {
+                "radio_type": "kiss",
+                "radios": [
+                    {"id": "a", "radio_type": "sx1262"},
+                    {"id": "b", "radio_type": " MODEM_TCP "},
+                ],
+                "fabric": {"default_radio": "b"},
+            },
+            "modem_tcp",
+        ),
+        ({"radio_type": " MODEM_USB ", "radios": [{"id": "a"}]}, "modem_usb"),
+        (
+            {"radio_type": "kiss", "radios": [{"id": "a", "radio_type": None}]},
+            None,
+        ),
+    ],
+)
+def test_frontend_status_radio_type_comes_from_default_board_config(config, expected):
+    manager = ConfigManager("/tmp/config.yaml", config)
+    status = manager.kiss_frontend_status()
+    assert status["radio_type"] == expected
+    assert status["limits"] == {}
+
+
 class _DummyRepeaterHandler:
     def __init__(self, config=None):
         self.radio_config = {}

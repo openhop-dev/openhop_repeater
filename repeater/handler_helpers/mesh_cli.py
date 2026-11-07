@@ -882,14 +882,14 @@ class MeshCLI:
 
             elif key == "agc.reset.interval":
                 interval = int(value)
+                if interval < 0 or interval > AGC_RESET_INTERVAL_MAX_SEC:
+                    return f"Error: must be 0-{AGC_RESET_INTERVAL_MAX_SEC}"
                 radio = self._kiss_radio("supports_agc_reset_control")
                 if radio is None:
                     return "Error: unsupported"
                 error = agc_reset_interval_error(radio, interval)
                 if error:
                     return f"Error: {error}"
-                if interval < 0 or interval > AGC_RESET_INTERVAL_MAX_SEC:
-                    return f"Error: must be 0-{AGC_RESET_INTERVAL_MAX_SEC}"
                 try:
                     effective = radio.set_agc_reset_interval(interval)
                 except ValueError:

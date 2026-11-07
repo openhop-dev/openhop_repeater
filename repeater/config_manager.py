@@ -204,15 +204,21 @@ class ConfigManager:
         ``configured`` is what the config asks for (absent = board default);
         ``running`` is what the modem reports now.
         """
-        from repeater.config import radio_frontend_config
+        from repeater.config import agc_reset_interval_limits, radio_frontend_config
 
+        board_config = self._default_radio_board_config()
+        radio_type = board_config.get("radio_type")
         radio = self._kiss_frontend_radio()
         supports = {key: False for key in self.KISS_FRONTEND_CONTROLS}
         running: Dict[str, Any] = {}
+        limits: Dict[str, Any] = {}
         if radio is not None:
             for key, check in self.KISS_FRONTEND_CONTROLS.items():
                 supports[key] = self._radio_supports(radio, check)
             if supports["agc_reset_interval_seconds"]:
+                agc_limits = agc_reset_interval_limits(radio)
+                if agc_limits is not None:
+                    limits["agc_reset_interval_seconds"] = agc_limits
                 interval = radio.get_agc_reset_interval()
                 if interval is not None:
                     running["agc_reset_interval_seconds"] = interval
@@ -227,9 +233,11 @@ class ConfigManager:
                     running["rx_boosted_gain"] = boosted
         return {
             "available": radio is not None,
+            "radio_type": str(radio_type).lower().strip() if radio_type is not None else None,
+            "limits": limits,
             "supports": supports,
             "running": running,
-            "configured": radio_frontend_config(self._default_radio_board_config()),
+            "configured": radio_frontend_config(board_config),
         }
 
     def apply_kiss_frontend(self, updates: Dict[str, Any]) -> Dict[str, Any]:

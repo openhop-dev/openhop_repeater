@@ -513,21 +513,38 @@ def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
 AGC_RESET_INTERVAL_MAX_SEC = 3600
 
 
+def agc_reset_interval_limits(radio) -> Optional[dict]:
+    """Probe the radio's AGC range and step without changing its settings."""
+    try:
+        normalise = getattr(radio, "effective_agc_reset_interval", None)
+        if not callable(normalise):
+            return None
+
+        # Find the ceiling within the host range without depending on the radio type.
+        low, high = 0, AGC_RESET_INTERVAL_MAX_SEC
+        while low < high:
+            mid = (low + high + 1) // 2
+            if normalise(mid) is None:
+                high = mid - 1
+            else:
+                low = mid
+        step = next((s for s in range(1, low + 1) if normalise(s) == s), 1)
+    except Exception:
+        return None
+    return {"min": 0, "max": low, "step": step}
+
+
 def agc_reset_interval_error(radio, seconds: int) -> Optional[str]:
     """Report the radio's range using its side-effect-free interval check."""
     normalise = getattr(radio, "effective_agc_reset_interval", None)
     if not callable(normalise) or normalise(seconds) is not None:
         return None
 
-    # Find the radio's ceiling within the host range without depending on its type.
-    low, high = 0, AGC_RESET_INTERVAL_MAX_SEC
-    while low < high:
-        mid = (low + high + 1) // 2
-        if normalise(mid) is None:
-            high = mid - 1
-        else:
-            low = mid
-    return f"AGC reset interval {seconds} is outside this radio's range (0-{low} seconds)"
+    limits = agc_reset_interval_limits(radio)
+    if limits is None:
+        return None
+    maximum = limits["max"]
+    return f"AGC reset interval {seconds} is outside this radio's range (0-{maximum} seconds)"
 
 
 _FRONTEND_SECTIONS = {
