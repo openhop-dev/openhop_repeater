@@ -44,6 +44,8 @@ Default root (under Repeater storage):
 - Code and virtualenv are **version-specific**.
 - The installed wheel is retained with each release so its virtualenv can be
   rebuilt automatically if a future container image changes Python versions.
+- Updating a plugin keeps the new release and the one it replaced; older
+  releases are removed.
 - `data/` is **not** version-specific and is never interpreted by the manager.
 - IPC socket default: `/var/lib/openhop_repeater/plugin-manager.sock`.
 

@@ -782,6 +782,8 @@ class PluginManager:
                 info = self.runtime.install_wheel(wheel_path, manifest)
             except Exception as exc:
                 raise PluginManagerError(f"update install failed: {exc}", 500) from exc
+            # Drop old releases, keeping the new one and the one it replaced
+            self.storage.prune_releases(plugin_id, {info["version"], installed_version})
             st = self.storage.read_state(info["id"]) or {}
             st = dict(st)
             st["version"] = info["version"]
