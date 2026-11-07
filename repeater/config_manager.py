@@ -240,6 +240,8 @@ class ConfigManager:
         ``{"applied": {...}, "errors": {key: reason}}``; a failed save is reported
         under the ``"save"`` error key.
         """
+        from repeater.config import agc_reset_interval_error
+
         radio = self._kiss_frontend_radio()
         applied: Dict[str, Any] = {}
         errors: Dict[str, str] = {}
@@ -250,14 +252,18 @@ class ConfigManager:
 
         agc = updates.get("agc_reset_interval_seconds")
         if agc is not None and "agc_reset_interval_seconds" not in errors:
-            try:
-                effective = radio.set_agc_reset_interval(agc)
-            except ValueError:
-                effective = None
-            if effective is None:
-                errors["agc_reset_interval_seconds"] = "radio did not apply setting"
+            error = agc_reset_interval_error(radio, agc)
+            if error:
+                errors["agc_reset_interval_seconds"] = error
             else:
-                applied["agc_reset_interval_seconds"] = effective
+                try:
+                    effective = radio.set_agc_reset_interval(agc)
+                except ValueError:
+                    effective = None
+                if effective is None:
+                    errors["agc_reset_interval_seconds"] = "radio did not apply setting"
+                else:
+                    applied["agc_reset_interval_seconds"] = effective
 
         fem = {
             key[4:]: updates[key]
@@ -295,7 +301,7 @@ class ConfigManager:
         not sent again and an OpenHop modem value of 30 is not treated as 28.
         Returns False when a configured setting could not be applied.
         """
-        from repeater.config import radio_frontend_config
+        from repeater.config import agc_reset_interval_error, radio_frontend_config
 
         desired = radio_frontend_config(self._default_radio_board_config())
         if not desired:
@@ -318,7 +324,11 @@ class ConfigManager:
             except (TypeError, ValueError):
                 expected = None
             if expected is None:
-                logger.warning("Invalid AGC reset interval %s for this radio", agc)
+                logger.warning(
+                    "%s",
+                    agc_reset_interval_error(radio, agc)
+                    or f"Invalid AGC reset interval {agc} for this radio",
+                )
                 ok = False
             elif applied.get("agc_reset_interval_seconds") != expected:
                 if not radio.supports_agc_reset_control():

@@ -512,6 +512,24 @@ def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
 # steps. The radio, not this loader, enforces its own range.
 AGC_RESET_INTERVAL_MAX_SEC = 3600
 
+
+def agc_reset_interval_error(radio, seconds: int) -> Optional[str]:
+    """Report the radio's range using its side-effect-free interval check."""
+    normalise = getattr(radio, "effective_agc_reset_interval", None)
+    if not callable(normalise) or normalise(seconds) is not None:
+        return None
+
+    # Find the radio's ceiling within the host range without depending on its type.
+    low, high = 0, AGC_RESET_INTERVAL_MAX_SEC
+    while low < high:
+        mid = (low + high + 1) // 2
+        if normalise(mid) is None:
+            high = mid - 1
+        else:
+            low = mid
+    return f"AGC reset interval {seconds} is outside this radio's range (0-{low} seconds)"
+
+
 _FRONTEND_SECTIONS = {
     "kiss": "kiss",
     "kiss-modem": "kiss",
@@ -565,6 +583,27 @@ def radio_frontend_config(board_config: dict) -> Dict[str, Any]:
 def kiss_hardware_config(board_config: dict) -> Dict[str, Any]:
     """Older name for :func:`radio_frontend_config`."""
     return radio_frontend_config(board_config)
+
+
+def _modem_frontend_kwargs(radio_class, board_config: dict) -> Dict[str, Any]:
+    options = radio_frontend_config(board_config)
+    if not options:
+        return {}
+    try:
+        params = inspect.signature(radio_class).parameters
+        param = params.get("radio_config")
+        if (param is not None and param.kind is not inspect.Parameter.POSITIONAL_ONLY) or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return {"radio_config": options}
+    except (TypeError, ValueError):
+        pass
+    logger.warning(
+        "Ignoring RF front-end settings for %s: these settings need a newer openhop_core; "
+        "building radio without them",
+        board_config.get("radio_type"),
+    )
+    return {}
 
 
 # MeshCore's private LoRa sync word, as the USB/TCP modem firmware expects it.
@@ -859,7 +898,7 @@ def get_radio_for_board(board_config: dict):
             preamble_length=int(radio_cfg.get("preamble_length", 16)),
             lbt_enabled=bool(tcp_cfg.get("lbt_enabled", True)),
             lbt_max_attempts=int(tcp_cfg.get("lbt_max_attempts", 5)),
-            radio_config=radio_frontend_config(board_config),
+            **_modem_frontend_kwargs(TCPLoRaRadio, board_config),
         )
 
         try:
@@ -908,7 +947,7 @@ def get_radio_for_board(board_config: dict):
             preamble_length=int(radio_cfg.get("preamble_length", 16)),
             lbt_enabled=bool(usb_cfg.get("lbt_enabled", True)),
             lbt_max_attempts=int(usb_cfg.get("lbt_max_attempts", 5)),
-            radio_config=radio_frontend_config(board_config),
+            **_modem_frontend_kwargs(USBLoRaRadio, board_config),
         )
 
         try:

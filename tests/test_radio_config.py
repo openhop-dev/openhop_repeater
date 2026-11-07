@@ -345,12 +345,22 @@ def test_radio_frontend_config_reads_the_modem_section_not_kiss():
         "rx_boosted_gain": False,
     }
     kiss = {"agc_reset_interval_seconds": 8, "fem_rx_gain": True}
-    assert radio_frontend_config(
-        {"radio_type": "modem_tcp", "modem_tcp": {"host": "m", **modem}, "kiss": kiss}
-    ) == modem
-    assert radio_frontend_config(
-        {"radio_type": "modem_usb", "modem_usb": {"port": "/dev/ttyACM0", **modem}, "kiss": kiss}
-    ) == modem
+    assert (
+        radio_frontend_config(
+            {"radio_type": "modem_tcp", "modem_tcp": {"host": "m", **modem}, "kiss": kiss}
+        )
+        == modem
+    )
+    assert (
+        radio_frontend_config(
+            {
+                "radio_type": "modem_usb",
+                "modem_usb": {"port": "/dev/ttyACM0", **modem},
+                "kiss": kiss,
+            }
+        )
+        == modem
+    )
     # Legacy repeater key fills in only when the radio's own section has no AGC key.
     assert radio_frontend_config(
         {
@@ -376,6 +386,92 @@ def test_modem_constructor_receives_its_frontend_config(monkeypatch, radio_type)
         "agc_reset_interval_seconds": 2000,
         "fem_rx_gain": True,
     }
+
+
+@pytest.mark.parametrize("radio_type", ["modem_tcp", "modem_usb"])
+def test_modem_constructor_omits_empty_frontend_config(monkeypatch, radio_type):
+    captured = _capture_modem(monkeypatch, radio_type)
+    board = _modem_board(radio_type, _modem_radio_cfg())
+    board["kiss"] = {"agc_reset_interval_seconds": 8}
+
+    get_radio_for_board(board)
+
+    assert "radio_config" not in captured
+
+
+@pytest.mark.parametrize("radio_type", ["modem_tcp", "modem_usb"])
+@pytest.mark.parametrize("frontend_configured", [False, True])
+def test_modem_builds_with_an_older_core(monkeypatch, caplog, radio_type, frontend_configured):
+    module = pytest.importorskip(f"openhop_core.hardware.{radio_type[6:]}_radio")
+    built = []
+    started = []
+
+    class ReleasedRadio:
+        def __init__(
+            self,
+            port,
+            frequency,
+            bandwidth,
+            spreading_factor,
+            coding_rate,
+            tx_power,
+            sync_word,
+            preamble_length,
+            lbt_enabled,
+            lbt_max_attempts,
+            host=None,
+            token=None,
+            connect_timeout=None,
+            baudrate=None,
+        ):
+            built.append(self)
+
+        def begin(self):
+            started.append(self)
+            return True
+
+    name = "TCPLoRaRadio" if radio_type == "modem_tcp" else "USBLoRaRadio"
+    monkeypatch.setattr(module, name, ReleasedRadio)
+    board = _modem_board(radio_type, _modem_radio_cfg())
+    if frontend_configured:
+        board[radio_type].update(agc_reset_interval_seconds=32, fem_rx_gain=True)
+
+    with caplog.at_level("WARNING", logger="Config"):
+        radio = get_radio_for_board(board)
+
+    assert radio is not None
+    assert len(built) == 1
+    assert started == built
+    if frontend_configured:
+        assert "front-end settings" in caplog.text
+        assert "need a newer openhop_core" in caplog.text
+        assert "building radio without them" in caplog.text
+        assert radio_type in caplog.text
+    else:
+        assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    "module_name, class_name, maximum, step",
+    [
+        ("kiss_modem_wrapper", "KissModemWrapper", 1020, 4),
+        ("tcp_radio", "TCPLoRaRadio", 3600, 1),
+        ("usb_radio", "USBLoRaRadio", 3600, 1),
+    ],
+)
+def test_agc_range_check_uses_the_core_wrapper(module_name, class_name, maximum, step):
+    from repeater.config import agc_reset_interval_error
+
+    module = pytest.importorskip(f"openhop_core.hardware.{module_name}")
+    wrapper = getattr(module, class_name)
+
+    for value in (0, 1, 10, maximum):
+        assert agc_reset_interval_error(wrapper, value) is None
+        assert wrapper.effective_agc_reset_interval(value) == value - value % step
+    for value in (-1, maximum + 1, 5000):
+        assert agc_reset_interval_error(wrapper, value) == (
+            f"AGC reset interval {value} is outside this radio's range (0-{maximum} seconds)"
+        )
 
 
 # ─── sync word warning for USB/TCP modems ──────────────────────────────

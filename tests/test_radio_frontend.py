@@ -212,6 +212,30 @@ def test_apply_maps_a_radio_range_error_to_not_applied():
     mgr.save_to_file.assert_not_called()
 
 
+@pytest.mark.parametrize("maximum, interval", [(1020, 1200), (3600, 3601), (777, 778)])
+def test_apply_reports_the_radio_range_without_sending_or_saving(maximum, interval):
+    radio = FakeKissRadio()
+    radio.effective_agc_reset_interval = lambda seconds: (
+        seconds if 0 <= seconds <= maximum else None
+    )
+    radio.set_agc_reset_interval = MagicMock()
+    mgr, config = _manager(radio)
+
+    result = mgr.apply_kiss_frontend({"agc_reset_interval_seconds": interval})
+
+    assert result == {
+        "applied": {},
+        "errors": {
+            "agc_reset_interval_seconds": (
+                f"AGC reset interval {interval} is outside this radio's range (0-{maximum} seconds)"
+            )
+        },
+    }
+    radio.set_agc_reset_interval.assert_not_called()
+    mgr.save_to_file.assert_not_called()
+    assert "agc_reset_interval_seconds" not in config["kiss"]
+
+
 def test_status_configured_comes_from_the_modem_section():
     radio = FakeKissRadio()
     mgr, _ = _manager(
@@ -304,6 +328,29 @@ def test_endpoint_post_partial_failure_still_returns_status(request_ctx):
     assert "fem_rx_gain: unsupported" in result["error"]
     assert result["data"]["applied"] == {"agc_reset_interval_seconds": 4}
     assert result["data"]["supports"]["fem_rx_gain"] is False
+
+
+def test_endpoint_post_reports_kiss_range_and_still_applies_other_keys(request_ctx):
+    from openhop_core.hardware.kiss_modem_wrapper import KissModemWrapper
+
+    radio = FakeKissRadio()
+    radio.effective_agc_reset_interval = KissModemWrapper.effective_agc_reset_interval
+    radio.set_agc_reset_interval = MagicMock()
+    api = _api(radio)
+    request_ctx.method = "POST"
+    request_ctx.json = {"agc_reset_interval_seconds": 1200, "fem_rx_gain": True}
+
+    result = api.radio_frontend()
+
+    error = "AGC reset interval 1200 is outside this radio's range (0-1020 seconds)"
+    assert result["success"] is False
+    assert error in result["error"]
+    assert result["data"]["errors"] == {"agc_reset_interval_seconds": error}
+    assert result["data"]["applied"] == {"fem_rx_gain": True}
+    radio.set_agc_reset_interval.assert_not_called()
+    assert "agc_reset_interval_seconds" not in api.config["kiss"]
+    assert api.config["kiss"]["fem_rx_gain"] is True
+    api.config_manager.save_to_file.assert_called_once()
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from repeater.airtime import AirtimeBudgets, AirtimeManager
 from repeater.config_manager import ConfigManager
 
@@ -379,9 +381,7 @@ def test_live_modem_agc_is_not_rounded_to_four_seconds():
         "kiss": {"agc_reset_interval_seconds": 8},
     }
     # 28 is what a KISS radio would have stored for 30. It must not count as applied.
-    radio = _DummyKissHwRadio(
-        agc_step=1, agc_max=3600, applied={"agc_reset_interval_seconds": 28}
-    )
+    radio = _DummyKissHwRadio(agc_step=1, agc_max=3600, applied={"agc_reset_interval_seconds": 28})
     manager, _ = _kiss_manager(config, radio)
 
     assert manager.live_update_daemon(["modem_tcp"])
@@ -394,9 +394,7 @@ def test_live_modem_agc_already_running_is_not_resent():
         "radio_type": "modem_usb",
         "modem_usb": {"port": "/dev/ttyACM0", "agc_reset_interval_seconds": 30},
     }
-    radio = _DummyKissHwRadio(
-        agc_step=1, agc_max=3600, applied={"agc_reset_interval_seconds": 30}
-    )
+    radio = _DummyKissHwRadio(agc_step=1, agc_max=3600, applied={"agc_reset_interval_seconds": 30})
     manager, _ = _kiss_manager(config, radio)
 
     assert manager.live_update_daemon(["modem_usb"])
@@ -415,13 +413,18 @@ def test_live_modem_is_offered_an_interval_above_the_kiss_limit():
     assert radio.calls == [("agc", 2000)]
 
 
-def test_live_kiss_interval_above_its_range_is_not_clamped_and_sent():
-    config = {"kiss": {"port": "/dev/ttyACM0", "agc_reset_interval_seconds": 2000}}
-    radio = _DummyKissHwRadio()
+@pytest.mark.parametrize("maximum, interval", [(1020, 1200), (1020, 2000), (3600, 3601)])
+def test_live_interval_above_its_range_is_not_sent_and_logs_range(caplog, maximum, interval):
+    config = {"kiss": {"port": "/dev/ttyACM0", "agc_reset_interval_seconds": interval}}
+    radio = _DummyKissHwRadio(agc_max=maximum)
     manager, _ = _kiss_manager(config, radio)
 
     assert manager.live_update_daemon(["kiss"]) is False
     assert radio.calls == []
+    assert (
+        f"AGC reset interval {interval} is outside this radio's range (0-{maximum} seconds)"
+        in caplog.text
+    )
 
 
 def test_default_frontend_section_writes_the_default_modem():

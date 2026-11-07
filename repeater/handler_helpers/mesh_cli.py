@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Optional
 import openhop_core
 
 from repeater import __version__ as repeater_version
-from repeater.config import AGC_RESET_INTERVAL_MAX_SEC
+from repeater.config import AGC_RESET_INTERVAL_MAX_SEC, agc_reset_interval_error
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +383,8 @@ class MeshCLI:
                 "  set direct.txdelay <val>  Direct TX delay (0-2)\n"
                 "  set multi.acks <n>     Multi-ack count\n"
                 "  set int.thresh <dbm>   Interference threshold\n"
-                "  set agc.reset.interval <n>  AGC reset secs (0-3600, 0=off; default radio)\n"
+                "  set agc.reset.interval <n>  AGC reset secs (0=off; default radio)\n"
+                "    KISS: 0-1020, rounded down to 4 s; OpenHop modem: 0-3600, 1 s steps\n"
                 "  set radio.fem.rxgain on|off  External FEM RX gain (default radio)\n"
                 "  set radio.fem.txgain on|off  External FEM TX gain (default radio)\n"
                 "  set radio.rxgain on|off  Radio chip boosted RX gain (default radio)"
@@ -881,11 +882,14 @@ class MeshCLI:
 
             elif key == "agc.reset.interval":
                 interval = int(value)
-                if interval < 0 or interval > AGC_RESET_INTERVAL_MAX_SEC:
-                    return f"Error: must be 0-{AGC_RESET_INTERVAL_MAX_SEC}"
                 radio = self._kiss_radio("supports_agc_reset_control")
                 if radio is None:
                     return "Error: unsupported"
+                error = agc_reset_interval_error(radio, interval)
+                if error:
+                    return f"Error: {error}"
+                if interval < 0 or interval > AGC_RESET_INTERVAL_MAX_SEC:
+                    return f"Error: must be 0-{AGC_RESET_INTERVAL_MAX_SEC}"
                 try:
                     effective = radio.set_agc_reset_interval(interval)
                 except ValueError:

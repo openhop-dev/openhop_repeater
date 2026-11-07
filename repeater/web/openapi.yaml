@@ -6365,6 +6365,8 @@ components:
             Periodic AGC reset in seconds, 0 = off. KISS firmware accepts 0-1020
             and rounds down to a multiple of 4. An OpenHop modem accepts 0-3600
             in 1-second steps. The stored value is what the radio confirmed.
+            An interval within these request limits but outside the radio's range
+            produces a per-key error naming that range and is not sent or saved.
         fem_rx_gain:
           type: boolean
           description: External FEM RX (LNA) gain
