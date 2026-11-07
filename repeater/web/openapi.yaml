@@ -5155,6 +5155,54 @@ paths:
               schema:
                 type: object
 
+  /companion/messages:
+    get:
+      tags: [System]
+      summary: Companion message history, received and sent, oldest first
+      description: |
+        The history a companion keeps when `message_history` is on, `id` ascending.
+        Pass the last `id` seen as `since` to read only what is new; each client
+        keeps its own cursor. A message the companion sent, from any client, has
+        its own key as `sender_key`.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Return only rows with an `id` above this
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+          description: Max rows to return; clamped to 1-500
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CompanionHistoryMessage'
+        '400':
+          description: A query parameter is not an integer
+        '404':
+          description: The companion does not keep message history (`message_history` is off), or is not found
+        '503':
+          description: The daemon, its companions or SQLite storage are not available, or the history read failed
+
   /companion/send_text:
     post:
       tags: [System]
@@ -7091,6 +7139,76 @@ components:
           type: boolean
           description: Client is currently active (synced within timeout period)
           example: true
+
+    CompanionHistoryMessage:
+      type: object
+      required: [id, sender_key, recipient_key, txt_type, timestamp, text, is_channel, channel_idx,
+                 path_len, sender_prefix, snr, rssi, channel_data_type, channel_data_payload,
+                 packet_hash, expected_ack, created_at]
+      properties:
+        id:
+          type: integer
+          description: The cursor; never reissued
+          example: 123
+        sender_key:
+          type: string
+          description: Sender's public key (64 hex chars); the companion's own for a message it sent, empty for a received channel message
+          example: "abc123def456..."
+        recipient_key:
+          type: string
+          description: Recipient's public key (64 hex chars) of a direct message the companion sent, else empty
+        txt_type:
+          type: integer
+          description: MeshCore text type (0 plain, 2 signed plain); CLI traffic is not kept
+          example: 0
+        timestamp:
+          type: integer
+          description: The message's own timestamp (Unix epoch)
+          example: 1734567890
+        text:
+          type: string
+          description: "Message text; a received channel message carries its `<name>: ` prefix"
+        is_channel:
+          type: boolean
+        channel_idx:
+          type: integer
+          description: Channel slot when `is_channel`, else 0
+        path_len:
+          type: integer
+          description: Route byte as received (encoded path length, 0xFF for direct); 0 for a sent message
+        sender_prefix:
+          type: string
+          description: 4-byte author prefix of a signed room post (8 hex chars), else empty
+        snr:
+          type: number
+          format: float
+          nullable: true
+          description: SNR of the received packet in dB; null when there is no reading, as for a sent message
+          example: 7.5
+        rssi:
+          type: integer
+          nullable: true
+          description: RSSI of the received packet in dBm; null when there is no reading
+          example: -90
+        channel_data_type:
+          type: integer
+          description: Type byte of binary channel data, else 0
+        channel_data_payload:
+          type: string
+          description: Binary channel data (hex), else empty
+        packet_hash:
+          type: string
+          nullable: true
+          description: Hash of the received packet, when known; null for a sent message
+        expected_ack:
+          type: integer
+          nullable: true
+          description: ACK CRC of a direct message the companion sent, which `send_confirmed` reports; null otherwise
+        created_at:
+          type: number
+          format: float
+          description: When the repeater recorded the row (Unix epoch); retention expires by it
+          example: 1734567890.5
 
     Identity:
       type: object

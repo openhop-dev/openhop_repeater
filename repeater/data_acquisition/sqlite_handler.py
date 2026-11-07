@@ -714,6 +714,10 @@ class SQLiteHandler:
         # daemon can rebuild the flood-reply RegionMap. Fired after commit, in the
         # writer's thread; see set_transport_keys_changed_callback.
         self._transport_keys_changed_cb = None
+        # Counts purges of companion_message_history. A companion's writer stamps
+        # each row with it as the row is queued, and companion_record_history
+        # refuses a row queued before a purge that has committed since.
+        self.history_generation = 0
         # Thread-local storage for persistent SQLite connections.
         # Opening a new connection on every DB call is expensive on SD-card
         # storage: each sqlite3.connect() call triggers file-system operations
@@ -1811,6 +1815,61 @@ class SQLiteHandler:
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS idx_packet_egress_time_radio ON packet_egress("
                         "timestamp, radio_id, success, lbt_attempts, lbt_channel_busy)"
+                    )
+                    conn.execute(
+                        "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
+                        (migration_name, time.time()),
+                    )
+                    logger.info(f"Migration '{migration_name}' applied successfully")
+
+                # Migration 21: message history, received and sent, for companions
+                # that opt in (``message_history``). Separate from companion_messages,
+                # the frame client's delivery queue, which is emptied as it syncs.
+                # Rows belong to the full public key: companion_hash is one byte, so
+                # a replacement identity could otherwise read its predecessor's.
+                # AUTOINCREMENT so an id is never reissued after retention empties
+                # the table, which would hide new rows behind a client's cursor.
+                migration_name = "add_companion_message_history"
+                existing = conn.execute(
+                    "SELECT migration_name FROM migrations WHERE migration_name = ?",
+                    (migration_name,),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS companion_message_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            companion_public_key BLOB NOT NULL,
+                            sender_key BLOB NOT NULL,
+                            recipient_key BLOB NOT NULL,
+                            txt_type INTEGER NOT NULL DEFAULT 0,
+                            timestamp INTEGER NOT NULL DEFAULT 0,
+                            text TEXT NOT NULL,
+                            is_channel INTEGER NOT NULL DEFAULT 0,
+                            channel_idx INTEGER NOT NULL DEFAULT 0,
+                            path_len INTEGER NOT NULL DEFAULT 0,
+                            sender_prefix TEXT NOT NULL DEFAULT '',
+                            snr REAL,
+                            rssi INTEGER,
+                            channel_data_type INTEGER,
+                            channel_data_payload BLOB,
+                            packet_hash TEXT,
+                            expected_ack INTEGER,
+                            created_at REAL NOT NULL
+                        )
+                        """
+                    )
+                    # companion_load_history reads one companion's rows after its
+                    # cursor, and the retention delete reads by created_at. Without
+                    # these each walks every companion's rows: LIMIT caps what is
+                    # returned, not what is read.
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_message_history_key_id "
+                        "ON companion_message_history(companion_public_key, id)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_message_history_created_at "
+                        "ON companion_message_history(created_at)"
                     )
                     conn.execute(
                         "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
@@ -4047,6 +4106,12 @@ class SQLiteHandler:
                     # or the UI shows scope counts for repeaters it no longer lists
                     # and presents them as current.
                     conn.execute("DELETE FROM neighbor_scopes")
+                if table_name == "companion_messages":
+                    # The history holds the companion's private messages too.
+                    conn.execute("DELETE FROM companion_message_history")
+                    # Inside the transaction, so a row a companion queued before this
+                    # purge is refused when it is written (companion_record_history).
+                    self.history_generation += 1
                 conn.commit()
                 logger.info(f"Purged {result.rowcount} rows from {table_name}")
                 return result.rowcount
@@ -4068,10 +4133,8 @@ class SQLiteHandler:
         """Prune retention-bounded tables.
 
         ``companion_events_days`` is forwarded from engine.py
-        (``storage.retention.companion_events_days``, default 31). Accepted here
-        so the periodic cleanup call cannot TypeError and silently skip all
-        SQLite pruning. Companion journal/history pruning is layered on by the
-        companion-api storage work once those tables exist.
+        (``storage.retention.companion_events_days``, default 31) and expires
+        companion_message_history by the time the repeater recorded each message.
         """
         try:
             cutoff = time.time() - (days * 24 * 3600)
@@ -4102,6 +4165,15 @@ class SQLiteHandler:
                 conn.execute("DELETE FROM packet_egress WHERE timestamp < ?", (cutoff,))
 
                 conn.commit()
+
+                # After the commit, so a database that lacks the table cannot cost
+                # the packet pruning above.
+                if companion_events_days is not None:
+                    conn.execute(
+                        "DELETE FROM companion_message_history WHERE created_at < ?",
+                        (time.time() - companion_events_days * 24 * 3600,),
+                    )
+                    conn.commit()
 
                 if (
                     packets_deleted > 0
@@ -5783,4 +5855,81 @@ class SQLiteHandler:
                 return {k: v for k, v in msg.items() if k != "id"}
         except Exception as e:
             logger.error(f"Failed to pop companion message: {e}")
+            return None
+
+    def companion_record_history(
+        self, public_key: bytes, msg: Dict, generation: Optional[int] = None
+    ) -> None:
+        """Append a message to the companion's history, which syncing never removes.
+
+        ``generation`` is ``history_generation`` as it was when the row was queued:
+        a row queued before a purge that has committed since is not written. A
+        reading the row lacks (``snr``, ``rssi``) is NULL, not 0.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO companion_message_history
+                    (companion_public_key, sender_key, recipient_key, txt_type, timestamp,
+                     text, is_channel, channel_idx, path_len, sender_prefix, snr, rssi,
+                     channel_data_type, channel_data_payload, packet_hash, expected_ack,
+                     created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        public_key,
+                        msg.get("sender_key", b""),
+                        msg.get("recipient_key", b""),
+                        msg.get("txt_type", 0),
+                        msg.get("timestamp", 0),
+                        msg.get("text", ""),
+                        int(msg.get("is_channel", False)),
+                        msg.get("channel_idx", 0),
+                        msg.get("path_len", 0),
+                        msg.get("sender_prefix", b"").hex(),
+                        msg.get("snr"),
+                        msg.get("rssi"),
+                        int(msg.get("channel_data_type") or 0),
+                        bytes(msg.get("channel_data_payload") or b""),
+                        msg.get("packet_hash") or None,
+                        msg.get("expected_ack"),
+                        time.time(),
+                    ),
+                )
+                # The INSERT holds the write lock, and a purge bumps the generation
+                # inside its own transaction, so a purge that committed after this
+                # row was queued has already bumped it.
+                if generation is not None and generation != self.history_generation:
+                    conn.rollback()
+                    return
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to record companion message history: {e}")
+
+    def companion_load_history(
+        self, public_key: bytes, since_id: int, limit: int
+    ) -> Optional[List[Dict]]:
+        """Load history after ``since_id``, oldest first (``id`` ascending).
+
+        Returns [] when there is none, or None when the read failed — callers
+        must not treat a failed read as "no messages".
+        """
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT id, sender_key, recipient_key, txt_type, timestamp, text, is_channel,
+                           channel_idx, path_len, sender_prefix, snr, rssi, channel_data_type,
+                           channel_data_payload, packet_hash, expected_ack, created_at
+                    FROM companion_message_history
+                    WHERE companion_public_key = ? AND id > ?
+                    ORDER BY id ASC LIMIT ?
+                    """,
+                    (public_key, since_id, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to load companion message history: {e}")
             return None
