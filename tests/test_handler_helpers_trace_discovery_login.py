@@ -703,3 +703,69 @@ async def test_login_helper_real_crypto_consume_vs_collision_forward():
     _force_dest_hash(collision, local_hash)
     assert await helper.process_login_packet(collision) is False
     assert not collision.is_marked_do_not_retransmit()
+
+
+async def _login(helper, local, sender, password, *, timestamp, out_path_len=-1, out_path=b""):
+    """Send one real ANON_REQ login and let its delayed reply go out."""
+    dest = _SendDest(local.get_public_key())
+    dest.out_path_len = out_path_len
+    dest.out_path = out_path
+    with patch.object(PacketBuilder, "_get_timestamp", return_value=timestamp):
+        packet = PacketBuilder.create_login_packet(dest, sender, password)
+    assert await helper.process_login_packet(packet) is True
+    with patch("asyncio.sleep", AsyncMock()):
+        await asyncio.gather(*list(helper._pending_tasks))
+    return packet
+
+
+def _repeater_login_helper(local):
+    injector = AsyncMock()
+    helper = LoginHelper(identity_manager=MagicMock(), packet_injector=injector)
+    helper.register_identity(
+        "repeater-main",
+        local,
+        identity_type="repeater",
+        config={"repeater": {"security": {"admin_password": "secret"}}},
+    )
+    return helper, injector
+
+
+@pytest.mark.asyncio
+async def test_flood_login_forgets_the_clients_stored_route():
+    """Firmware handleLoginReq sets OUT_PATH_UNKNOWN on a flood login: the client
+    may have moved, so replies must flood until its next PATH."""
+    local, sender, _ = _distinct_identities()
+    helper, _injector = _repeater_login_helper(local)
+    acl = helper.acls[local.get_public_key()[0]]
+
+    await _login(helper, local, sender, "secret", timestamp=1_000)
+    client = acl.get_client(sender.get_public_key())
+    assert client is not None
+    client.out_path = bytearray(b"\xaa\xbb")  # learned from a PATH
+    client.out_path_len = 0x02
+
+    await _login(helper, local, sender, "secret", timestamp=1_001)
+
+    assert client.out_path_len == -1
+    assert bytes(client.out_path) == b""
+
+
+@pytest.mark.asyncio
+async def test_direct_login_keeps_the_route_and_is_answered_along_it():
+    local, sender, _ = _distinct_identities()
+    helper, injector = _repeater_login_helper(local)
+    acl = helper.acls[local.get_public_key()[0]]
+
+    await _login(helper, local, sender, "secret", timestamp=1_000)
+    client = acl.get_client(sender.get_public_key())
+    client.out_path = bytearray(b"\xaa\xbb")
+    client.out_path_len = 0x02
+    injector.reset_mock()
+
+    await _login(helper, local, sender, "secret", timestamp=1_001, out_path_len=0)
+
+    assert client.out_path_len == 0x02
+    assert bytes(client.out_path) == b"\xaa\xbb"
+    reply = injector.await_args.args[0]
+    assert not reply.is_route_flood()
+    assert bytes(reply.path) == b"\xaa\xbb"

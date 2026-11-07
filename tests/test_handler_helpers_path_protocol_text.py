@@ -1564,3 +1564,44 @@ async def test_telemetry_req_end_to_end_produces_response_and_advances_watermark
     assert genuine.is_marked_do_not_retransmit()
     injector.assert_awaited()  # a RESPONSE frame was transmitted
     assert client.last_timestamp == ts  # replay watermark advanced
+
+
+def test_acl_contact_proxy_exposes_live_out_path():
+    """The text handler routes a DM's ACK on the contact's out_path; the proxy
+    must expose the client's path (live, so a later PATH update is seen)."""
+    client = _FakeClient(pubkey=bytes([0x3C]) + b"x" * 31, shared_secret=b"k" * 32)
+    helper = TextHelper(identity_manager=MagicMock(), acl_dict={})
+    (proxy,) = helper._create_acl_contacts_wrapper(_FakeACL([client])).contacts
+
+    assert proxy.out_path_len == -1
+    client.out_path = bytearray(b"\xaa\xbb")
+    client.out_path_len = 0x02  # 2 hops of 1-byte hashes (wire encoding)
+    assert proxy.out_path_len == 0x02
+    assert bytes(proxy.out_path) == b"\xaa\xbb"
+
+
+def test_direct_dm_ack_uses_the_clients_known_path_not_flood():
+    from openhop_core.node.handlers.text import TextMessageHandler
+
+    client = _FakeClient(pubkey=bytes([0x3C]) + b"x" * 31, shared_secret=b"k" * 32)
+    client.out_path = bytearray()
+    client.out_path_len = 0x40  # known path, zero hops (2-byte hashes)
+    helper = TextHelper(identity_manager=MagicMock(), acl_dict={})
+    (proxy,) = helper._create_acl_contacts_wrapper(_FakeACL([client])).contacts
+
+    core = TextMessageHandler.__new__(TextMessageHandler)
+    core.log = lambda *_: None
+    core.multi_acks = 0
+    scheduled = core._build_ack_responses(
+        packet=SimpleNamespace(),
+        matched_contact=proxy,
+        shared_secret=b"k" * 32,
+        pubkey=client.id.get_public_key(),
+        ack_hash=b"\x01\x02\x03\x04",
+        is_flood=False,
+    )
+
+    assert len(scheduled) == 1
+    ack_packet, _delay = scheduled[0]
+    assert not ack_packet.is_route_flood()
+    assert bytes(ack_packet.path) == b""

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _INVALID_NODE_NAME_CHARS = "\n\r\x00"
 
 # Optional per-companion RepeaterCompanionBridge constructor settings (power-user).
-COMPANION_BRIDGE_SETTING_KEYS = frozenset({"max_contacts", "offline_queue_size"})
+COMPANION_BRIDGE_SETTING_KEYS = frozenset({"max_contacts", "offline_queue_size", "message_history"})
 
 # Settings that must not be applied from config (fixed at openhop_core defaults).
 _COMPANION_IGNORED_BRIDGE_KEYS = frozenset({"max_channels", "adv_type"})
@@ -86,8 +86,8 @@ def parse_positive_int(value: Any, field_name: str, *, minimum: int = 1) -> int:
 def parse_companion_bridge_kwargs(settings: dict) -> Dict[str, int]:
     """Extract optional RepeaterCompanionBridge kwargs from companion settings.
 
-    Only ``max_contacts`` and ``offline_queue_size`` are honored. ``max_channels`` and
-    ``adv_type`` are ignored with a warning if present.
+    Only ``max_contacts``, ``offline_queue_size`` and ``message_history`` are honored.
+    ``max_channels`` and ``adv_type`` are ignored with a warning if present.
     """
     if not settings:
         return {}
@@ -106,6 +106,9 @@ def parse_companion_bridge_kwargs(settings: dict) -> Dict[str, int]:
         kwargs["offline_queue_size"] = parse_positive_int(
             settings["offline_queue_size"], "offline_queue_size", minimum=0
         )
+    if "message_history" in settings:
+        # Only a real true: bool("false") would turn on keeping private messages.
+        kwargs["message_history"] = settings["message_history"] is True
     return kwargs
 
 
