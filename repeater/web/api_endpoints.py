@@ -2144,21 +2144,35 @@ class APIEndpoints:
             logger.error(f"Error setting duty cycle: {e}", exc_info=True)
             return self._error(e)
 
+    def _frontend_radio_id(self, radio_id):
+        """Validate a ``radio_id`` for /api/radio_frontend; None means the default radio."""
+        if radio_id is None or radio_id == "":
+            return None
+        if not isinstance(radio_id, str):
+            raise cherrypy.HTTPError(400, "radio_id must be a string")
+        if radio_id not in self.config_manager.radio_ids():
+            raise cherrypy.HTTPError(404, f"Unknown radio_id {radio_id!r}")
+        return radio_id
+
     @cherrypy.expose
     @cherrypy.tools.json_out()
     @cherrypy.tools.json_in(force=False)
-    def radio_frontend(self):
-        """RF front-end controls of the default radio (KISS or OpenHop modem).
+    def radio_frontend(self, radio_id=None):
+        """RF front-end controls of one radio (KISS or OpenHop modem).
 
         AGC reset interval, external FEM gain, and the radio chip's boosted RX gain.
 
-        GET  /api/radio_frontend -> capabilities, running and configured values
-        POST /api/radio_frontend {"agc_reset_interval_seconds": 0-3600,
+        GET  /api/radio_frontend[?radio_id=<id>]
+             -> capabilities, running and configured values
+        POST /api/radio_frontend {"radio_id": "<id>",
+                                  "agc_reset_interval_seconds": 0-3600,
                                   "fem_rx_gain": bool, "fem_tx_gain": bool,
                                   "rx_boosted_gain": bool}
 
-        POST applies to the modem first and persists only what it confirms; no
-        restart is needed.
+        ``radio_id`` names a ``radios[]`` entry on a multi-radio node; without it
+        the default radio is used. POST applies to the modem first and persists
+        only what it confirms, into that radio's own section; no restart is
+        needed.
         """
         self._set_cors_headers()
         if cherrypy.request.method == "OPTIONS":
@@ -2166,12 +2180,14 @@ class APIEndpoints:
 
         try:
             if cherrypy.request.method == "GET":
-                return self._success(self.config_manager.kiss_frontend_status())
+                radio_id = self._frontend_radio_id(radio_id)
+                return self._success(self.config_manager.kiss_frontend_status(radio_id))
             self._require_post()
 
             data = cherrypy.request.json or {}
             if not isinstance(data, dict):
                 return self._error("Request body must be a JSON object")
+            radio_id = self._frontend_radio_id(data.get("radio_id", radio_id))
             updates = {}
             if "agc_reset_interval_seconds" in data:
                 agc = data["agc_reset_interval_seconds"]
@@ -2186,8 +2202,8 @@ class APIEndpoints:
             if not updates:
                 return self._error("No valid settings provided")
 
-            result = self.config_manager.apply_kiss_frontend(updates)
-            status = self.config_manager.kiss_frontend_status()
+            result = self.config_manager.apply_kiss_frontend(updates, radio_id)
+            status = self.config_manager.kiss_frontend_status(radio_id)
             if result["errors"]:
                 detail = ", ".join(f"{k}: {v}" for k, v in result["errors"].items())
                 return {

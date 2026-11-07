@@ -899,16 +899,26 @@ paths:
   /radio_frontend:
     get:
       tags: [System]
-      summary: Get default-radio RF front-end controls
+      summary: Get a radio's RF front-end controls
       description: >
-        AGC reset interval, external FEM gain and radio chip boosted RX gain of the
-        default radio, read from the modem. KISS firmware v2 and OpenHop modem
-        firmware that implements the RF frame commands report support; the controls
-        a board supports come from the board itself.
+        AGC reset interval, external FEM gain and radio chip boosted RX gain of one
+        radio, read from the modem: the radios[] entry named by radio_id, or the
+        default radio without it. KISS firmware v2 and OpenHop modem firmware that
+        implements the RF frame commands report support; the controls a board
+        supports come from the board itself.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
+      parameters:
+        - name: radio_id
+          in: query
+          required: false
+          description: Id of a radios[] entry; omit for the default radio
+          schema:
+            type: string
       responses:
+        '404':
+          description: radio_id names no radios[] entry
         '200':
           description: Front-end status
           content:
@@ -923,11 +933,12 @@ paths:
                     $ref: '#/components/schemas/RadioFrontendStatus'
     post:
       tags: [System]
-      summary: Set default-radio RF front-end controls
+      summary: Set a radio's RF front-end controls
       description: >
-        Applies the given settings to the default radio's modem and persists only the
-        values it confirms. Takes effect immediately; no restart is needed. Omitted
-        fields are left unchanged.
+        Applies the given settings to one radio's modem (the radios[] entry named by
+        radio_id, or the default radio without it) and persists only the values it
+        confirms, into that radio's own config section. Takes effect immediately; no
+        restart is needed. Omitted fields are left unchanged.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -936,15 +947,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RadioFrontendSettings'
+              $ref: '#/components/schemas/RadioFrontendRequest'
             examples:
               agc:
                 value:
                   agc_reset_interval_seconds: 4
               fem:
                 value:
+                  radio_id: link
                   fem_rx_gain: true
       responses:
+        '404':
+          description: radio_id names no radios[] entry
         '200':
           description: >
             Settings applied. On partial failure success is false, error names each
@@ -6427,14 +6441,27 @@ components:
             The radio chip's own boosted RX gain (MeshCore radio.rxgain), separate
             from the external FEM RX gain
 
+    RadioFrontendRequest:
+      allOf:
+        - $ref: '#/components/schemas/RadioFrontendSettings'
+        - type: object
+          properties:
+            radio_id:
+              type: string
+              description: Id of a radios[] entry; omit for the default radio
+
     RadioFrontendStatus:
       type: object
       required: [available, supports, running, configured]
       properties:
+        radio_id:
+          type: string
+          nullable: true
+          description: The radios[] entry these controls belong to; null on a single-radio node
         radio_type:
           type: string
           nullable: true
-          description: Configured default radio type, stripped and lower-cased; null when absent
+          description: Configured radio type, stripped and lower-cased; null when absent
         limits:
           type: object
           description: Probed control limits; absent keys have no known limits
@@ -6452,7 +6479,7 @@ components:
                   type: integer
         available:
           type: boolean
-          description: Default radio is a KISS or OpenHop modem with front-end controls
+          description: The radio is a KISS or OpenHop modem with front-end controls
         supports:
           type: object
           required: [agc_reset_interval_seconds, fem_rx_gain, fem_tx_gain, rx_boosted_gain]
