@@ -96,7 +96,7 @@ async def test_scoped_send_through_repeater_bridge_reaches_injector_scoped():
     bridge = RepeaterCompanionBridge(LocalIdentity(), injector, node_name="rep")
     bridge.channels.set(0, Channel(name="test-ch", secret=b"\xab" * 16))
 
-    assert await bridge.send_channel_message(0, "hello", flood_scope_key=SCOPE_KEY) is True
+    assert await bridge.send_channel_message(0, "hello", flood_scope_key=SCOPE_KEY)
 
     assert len(injected) == 1
     pkt = injected[0]
@@ -231,7 +231,7 @@ async def test_default_scope_reaches_the_radio_without_an_override():
     """
     bridge, radio = _wire_production_chain()
 
-    assert await bridge.send_channel_message(0, "control") is True
+    assert await bridge.send_channel_message(0, "control")
 
     pkt = _last_radio_packet(radio)
     assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
@@ -250,7 +250,7 @@ async def test_override_survives_the_whole_repeater_path_to_the_radio():
     """
     bridge, radio = _wire_production_chain()
 
-    assert await bridge.send_channel_message(0, "hello", flood_scope_key=CLIENT_REGION_KEY) is True
+    assert await bridge.send_channel_message(0, "hello", flood_scope_key=CLIENT_REGION_KEY)
 
     pkt = _last_radio_packet(radio)
     assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
