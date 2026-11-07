@@ -556,7 +556,7 @@ class CompanionAPIEndpoints:
         if not text:
             raise cherrypy.HTTPError(400, "text required")
         success = self._run_async(bridge.send_channel_message(channel_idx, text))
-        return self._success({"sent": success})
+        return self._success({"sent": bool(success)})
 
     # ----- Login -----
 
