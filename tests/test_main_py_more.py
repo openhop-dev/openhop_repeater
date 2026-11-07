@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from repeater.data_acquisition.sqlite_handler import SQLiteHandler
 from repeater.identity_manager import IdentityManager
 from repeater.main import RepeaterDaemon
 
@@ -26,6 +27,63 @@ def _base_config():
         "logging": {"level": "INFO"},
         "http": {"host": "127.0.0.1", "port": 8123},
     }
+
+
+@pytest.mark.asyncio
+async def test_remove_companion_stops_only_its_runtime_and_releases_identity(tmp_path):
+    daemon = RepeaterDaemon(_base_config(), radio=object())
+    daemon.identity_manager = IdentityManager({})
+    identity = _FakeLocalIdentity(b"\x10" * 32)
+    other_identity = _FakeLocalIdentity(b"\x20" * 32)
+    daemon.identity_manager.register_identity("deleted", identity, {}, "companion")
+    daemon.identity_manager.register_identity("kept", other_identity, {}, "companion")
+    daemon.identity_manager.register_identity("server", identity, {}, "room_server")
+    bridge = SimpleNamespace(
+        get_public_key=identity.get_public_key, stop=AsyncMock(), note_flood_copy=MagicMock()
+    )
+    other_bridge = SimpleNamespace(stop=AsyncMock())
+    server = SimpleNamespace(bridge=bridge, stop=AsyncMock())
+    other_server = SimpleNamespace(bridge=other_bridge, stop=AsyncMock())
+    daemon.companion_bridges = {0x10: bridge, 0x20: other_bridge}
+    daemon.companion_frame_servers = [server, other_server]
+    daemon.dispatcher = SimpleNamespace(remove_raw_packet_subscriber=MagicMock())
+    # What the companion stored stays for one re-created with its key.
+    db = SQLiteHandler(tmp_path)
+    db.companion_upsert_contact("0x10", {"pubkey": b"\x33" * 32, "name": "peer"})
+    db.companion_push_message("0x10", {"text": "kept"})
+    daemon.repeater_handler = SimpleNamespace(storage=SimpleNamespace(sqlite_handler=db))
+
+    assert await daemon.remove_companion(identity.get_public_key().hex()) is True
+    # Gone already: a second delete, or a key the runtime never loaded.
+    assert await daemon.remove_companion(identity.get_public_key().hex()) is False
+
+    server.stop.assert_awaited_once()
+    bridge.stop.assert_awaited_once()
+    other_server.stop.assert_not_awaited()
+    other_bridge.stop.assert_not_awaited()
+    daemon.dispatcher.remove_raw_packet_subscriber.assert_called_once_with(bridge.note_flood_copy)
+    assert daemon.companion_bridges == {0x20: other_bridge}
+    assert daemon.companion_frame_servers == [other_server]
+    assert "deleted" not in daemon.identity_manager.named_identities
+    assert (0x10, "companion") not in daemon.identity_manager.identities
+    assert (0x10, "companion") not in daemon.identity_manager.registered_hashes
+    assert (0x10, "server") in daemon.identity_manager.identities
+    assert daemon.identity_manager.register_identity("replacement", identity, {}, "companion")
+    assert (db.companion_count_contacts("0x10"), db.companion_count_messages("0x10")) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_remove_companion_rejects_a_different_key_with_the_same_prefix():
+    daemon = RepeaterDaemon(_base_config(), radio=object())
+    identity = _FakeLocalIdentity(b"\x10" * 32)
+    bridge = SimpleNamespace(get_public_key=identity.get_public_key, stop=AsyncMock())
+    daemon.companion_bridges = {0x10: bridge}
+
+    with pytest.raises(ValueError, match="public key does not match"):
+        await daemon.remove_companion((b"\x10" + b"X" * 31).hex())
+
+    bridge.stop.assert_not_awaited()
+    assert daemon.companion_bridges == {0x10: bridge}
 
 
 @pytest.mark.asyncio
