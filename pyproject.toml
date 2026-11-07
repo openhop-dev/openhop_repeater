@@ -73,6 +73,7 @@ include = ["repeater*"]
 repeater = [
     "web/html/*.html",
     "web/html/*.ico",
+    "web/html/frontend-build.json",
     "web/html/assets/**/*",
     "web/*.yaml",
     "web/*.html",
