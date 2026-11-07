@@ -1137,6 +1137,42 @@ class RepeaterDaemon:
             channel_count,
         )
 
+    async def remove_companion(self, public_key: str) -> bool:
+        """Stop a deleted companion's runtime; its stored contacts and messages stay.
+
+        The reverse of add_companion_from_config, in the shutdown's order: its
+        frame servers, its flood-copy feed, its bridge, then its name and hash
+        slot, so a companion re-created with the same name or key loads live
+        rather than after a restart. Returns whether a bridge was running for
+        this key; with none, the config may hold a key the runtime never loaded.
+        """
+        key = bytes.fromhex(public_key)
+        companion_hash = key[0]
+        bridge = self.companion_bridges.get(companion_hash)
+        if bridge is not None:
+            if bridge.get_public_key() != key:
+                raise ValueError("Companion bridge public key does not match")
+            # Unlisted before the awaits below yield, so the router and the raw
+            # RX push stop handing it packets while it closes.
+            del self.companion_bridges[companion_hash]
+            for server in list(self.companion_frame_servers):
+                if server.bridge is bridge:
+                    self.companion_frame_servers.remove(server)
+                    await server.stop()
+            if self.dispatcher:
+                self.dispatcher.remove_raw_packet_subscriber(bridge.note_flood_copy)
+            # retire() rather than stop(): it also ends the bridge's history writer.
+            retire = getattr(bridge, "retire", None)
+            await (retire() if callable(retire) else bridge.stop())
+
+        if self.identity_manager:
+            for name, (identity, _cfg, identity_type) in list(
+                self.identity_manager.named_identities.items()
+            ):
+                if identity_type == "companion" and identity.get_public_key() == key:
+                    self.identity_manager.unregister_identity(name)
+        return bridge is not None
+
     async def add_companion_from_config(self, comp_config: dict) -> None:
         """
         Load a single companion from config and register it (hot-reload).

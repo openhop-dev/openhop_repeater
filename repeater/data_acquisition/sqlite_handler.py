@@ -714,6 +714,10 @@ class SQLiteHandler:
         # daemon can rebuild the flood-reply RegionMap. Fired after commit, in the
         # writer's thread; see set_transport_keys_changed_callback.
         self._transport_keys_changed_cb = None
+        # Counts purges of companion_message_history. A companion's writer stamps
+        # each row with it as the row is queued, and companion_record_history
+        # refuses a row queued before a purge that has committed since.
+        self.history_generation = 0
         # Thread-local storage for persistent SQLite connections.
         # Opening a new connection on every DB call is expensive on SD-card
         # storage: each sqlite3.connect() call triggers file-system operations
@@ -760,6 +764,108 @@ class SQLiteHandler:
             self._local.conn = conn
         return conn
 
+    def store_usage_buckets(self, buckets: list) -> None:
+        """Add a batch of minute deltas atomically; callers must not replay batches."""
+        rows = [
+            (
+                row["bucket"],
+                row["kind"],
+                row["source"],
+                row["upload_bytes"],
+                row["download_bytes"],
+                row["messages"],
+            )
+            for row in buckets
+        ]
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO network_usage
+                   (bucket, kind, source, upload_bytes, download_bytes, messages)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(kind, source, bucket) DO UPDATE SET
+                   upload_bytes = upload_bytes + excluded.upload_bytes,
+                   download_bytes = download_bytes + excluded.download_bytes,
+                   messages = messages + excluded.messages""",
+                rows,
+            )
+
+    def store_usage_batch(self, batch_id, rows, names, coverage, timestamp):
+        """Replay-safe collector transaction; receipt and increments commit together."""
+        with self._connect() as conn:
+            if not conn.execute(
+                "INSERT OR IGNORE INTO network_usage_batches(id, timestamp) VALUES (?, ?)",
+                (batch_id, timestamp),
+            ).rowcount:
+                return
+            conn.executemany(
+                """INSERT INTO network_usage
+                (bucket, kind, source, upload_bytes, download_bytes, messages)
+                VALUES (:bucket, :kind, :source, :upload_bytes, :download_bytes, :messages)
+                ON CONFLICT(kind, source, bucket) DO UPDATE SET
+                upload_bytes=upload_bytes+excluded.upload_bytes,
+                download_bytes=download_bytes+excluded.download_bytes,
+                messages=messages+excluded.messages""",
+                rows,
+            )
+            conn.executemany(
+                "INSERT OR REPLACE INTO network_usage_names(kind, source, name) VALUES (?, ?, ?)",
+                [(kind, source, name) for (kind, source), name in names.items()],
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO network_usage_coverage(bucket) VALUES (?)",
+                [(bucket,) for bucket in coverage],
+            )
+
+    def get_usage_snapshot(self, start: int, end: int):
+        """Read totals, coverage and labels from one WAL snapshot during concurrent flushes."""
+        with self._connect() as conn:
+            # sqlite3's implicit transactions begin on writes, not SELECTs.
+            # An explicit BEGIN keeps all three reads on the same snapshot.
+            conn.execute("BEGIN")
+            rows = self.get_usage_totals(start, end)
+            first, covered, names = self.get_usage_coverage(start, end)
+            return rows, first, covered, names
+
+    def get_usage_coverage(self, start, end):
+        conn = self._connect()
+        first = conn.execute("SELECT MIN(bucket) FROM network_usage_coverage").fetchone()[0]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM network_usage_coverage WHERE bucket >= ? AND bucket < ?",
+            (start, end),
+        ).fetchone()[0]
+        names = {
+            (kind, source): name
+            for kind, source, name in conn.execute(
+                "SELECT kind, source, name FROM network_usage_names"
+            )
+        }
+        return first, count, names
+
+    def prune_usage_before(self, cutoff: int) -> None:
+        """Delete expired usage buckets independently of packet-history retention."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM network_usage WHERE bucket < ?", (cutoff,))
+            conn.execute("DELETE FROM network_usage_coverage WHERE bucket < ?", (cutoff,))
+            conn.execute("DELETE FROM network_usage_batches WHERE timestamp < ?", (cutoff,))
+            conn.execute("""DELETE FROM network_usage_names WHERE NOT EXISTS
+                (SELECT 1 FROM network_usage u WHERE u.kind=network_usage_names.kind
+                 AND u.source=network_usage_names.source)""")
+
+    def get_usage_totals(self, start: int, end: int) -> list:
+        """Return source totals for minute buckets in the half-open [start, end) range."""
+        rows = (
+            self._connect()
+            .execute(
+                """SELECT kind, source, SUM(upload_bytes), SUM(download_bytes), SUM(messages)
+               FROM network_usage WHERE bucket >= ? AND bucket < ?
+               GROUP BY kind, source ORDER BY kind, source""",
+                (start, end),
+            )
+            .fetchall()
+        )
+        keys = ("kind", "source", "upload_bytes", "download_bytes", "messages")
+        return [dict(zip(keys, row)) for row in rows]
+
     def _invalidate_hot_caches(self) -> None:
         self._packet_stats_cache.clear()
         self._neighbors_cache = {"timestamp": 0.0, "value": None}
@@ -787,6 +893,36 @@ class SQLiteHandler:
     def _init_database(self):
         try:
             with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_batches (id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_network_usage_batches_time ON network_usage_batches(timestamp)"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_names (kind TEXT, source TEXT, name TEXT, PRIMARY KEY(kind, source))"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS network_usage_coverage (bucket INTEGER PRIMARY KEY)"
+                )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS network_usage (
+                        bucket INTEGER NOT NULL CHECK(typeof(bucket) = 'integer'
+                            AND bucket >= 0 AND bucket % 60 = 0),
+                        kind TEXT NOT NULL CHECK(kind IN ('interface', 'mqtt')),
+                        source TEXT NOT NULL CHECK(length(source) BETWEEN 1 AND 256),
+                        upload_bytes INTEGER NOT NULL CHECK(typeof(upload_bytes) = 'integer'
+                            AND upload_bytes >= 0),
+                        download_bytes INTEGER NOT NULL CHECK(typeof(download_bytes) = 'integer'
+                            AND download_bytes >= 0),
+                        messages INTEGER NOT NULL CHECK(typeof(messages) = 'integer'
+                            AND messages >= 0),
+                        PRIMARY KEY(kind, source, bucket)
+                    )"""
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_network_usage_bucket ON network_usage(bucket)"
+                )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS packets (
@@ -1679,6 +1815,61 @@ class SQLiteHandler:
                     conn.execute(
                         "CREATE INDEX IF NOT EXISTS idx_packet_egress_time_radio ON packet_egress("
                         "timestamp, radio_id, success, lbt_attempts, lbt_channel_busy)"
+                    )
+                    conn.execute(
+                        "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
+                        (migration_name, time.time()),
+                    )
+                    logger.info(f"Migration '{migration_name}' applied successfully")
+
+                # Migration 21: message history, received and sent, for companions
+                # that opt in (``message_history``). Separate from companion_messages,
+                # the frame client's delivery queue, which is emptied as it syncs.
+                # Rows belong to the full public key: companion_hash is one byte, so
+                # a replacement identity could otherwise read its predecessor's.
+                # AUTOINCREMENT so an id is never reissued after retention empties
+                # the table, which would hide new rows behind a client's cursor.
+                migration_name = "add_companion_message_history"
+                existing = conn.execute(
+                    "SELECT migration_name FROM migrations WHERE migration_name = ?",
+                    (migration_name,),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS companion_message_history (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            companion_public_key BLOB NOT NULL,
+                            sender_key BLOB NOT NULL,
+                            recipient_key BLOB NOT NULL,
+                            txt_type INTEGER NOT NULL DEFAULT 0,
+                            timestamp INTEGER NOT NULL DEFAULT 0,
+                            text TEXT NOT NULL,
+                            is_channel INTEGER NOT NULL DEFAULT 0,
+                            channel_idx INTEGER NOT NULL DEFAULT 0,
+                            path_len INTEGER NOT NULL DEFAULT 0,
+                            sender_prefix TEXT NOT NULL DEFAULT '',
+                            snr REAL,
+                            rssi INTEGER,
+                            channel_data_type INTEGER,
+                            channel_data_payload BLOB,
+                            packet_hash TEXT,
+                            expected_ack INTEGER,
+                            created_at REAL NOT NULL
+                        )
+                        """
+                    )
+                    # companion_load_history reads one companion's rows after its
+                    # cursor, and the retention delete reads by created_at. Without
+                    # these each walks every companion's rows: LIMIT caps what is
+                    # returned, not what is read.
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_message_history_key_id "
+                        "ON companion_message_history(companion_public_key, id)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_message_history_created_at "
+                        "ON companion_message_history(created_at)"
                     )
                     conn.execute(
                         "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
@@ -3915,7 +4106,21 @@ class SQLiteHandler:
                     # or the UI shows scope counts for repeaters it no longer lists
                     # and presents them as current.
                     conn.execute("DELETE FROM neighbor_scopes")
-                conn.commit()
+                if table_name == "companion_messages":
+                    # The history holds the companion's private messages too.
+                    conn.execute("DELETE FROM companion_message_history")
+                    # Inside the transaction, so a row a companion queued before this
+                    # purge is refused when it is written (companion_record_history).
+                    self.history_generation += 1
+                try:
+                    conn.commit()
+                except Exception:
+                    if table_name == "companion_messages":
+                        # Nothing was purged, so the rows queued before it are still
+                        # wanted. Restored before the rollback releases the write lock,
+                        # so no writer checks against the bumped value.
+                        self.history_generation -= 1
+                    raise
                 logger.info(f"Purged {result.rowcount} rows from {table_name}")
                 return result.rowcount
         except Exception as e:
@@ -3936,10 +4141,8 @@ class SQLiteHandler:
         """Prune retention-bounded tables.
 
         ``companion_events_days`` is forwarded from engine.py
-        (``storage.retention.companion_events_days``, default 31). Accepted here
-        so the periodic cleanup call cannot TypeError and silently skip all
-        SQLite pruning. Companion journal/history pruning is layered on by the
-        companion-api storage work once those tables exist.
+        (``storage.retention.companion_events_days``, default 31) and expires
+        companion_message_history by the time the repeater recorded each message.
         """
         try:
             cutoff = time.time() - (days * 24 * 3600)
@@ -3970,6 +4173,15 @@ class SQLiteHandler:
                 conn.execute("DELETE FROM packet_egress WHERE timestamp < ?", (cutoff,))
 
                 conn.commit()
+
+                # After the commit, so a database that lacks the table cannot cost
+                # the packet pruning above.
+                if companion_events_days is not None:
+                    conn.execute(
+                        "DELETE FROM companion_message_history WHERE created_at < ?",
+                        (time.time() - companion_events_days * 24 * 3600,),
+                    )
+                    conn.commit()
 
                 if (
                     packets_deleted > 0
@@ -5651,4 +5863,81 @@ class SQLiteHandler:
                 return {k: v for k, v in msg.items() if k != "id"}
         except Exception as e:
             logger.error(f"Failed to pop companion message: {e}")
+            return None
+
+    def companion_record_history(
+        self, public_key: bytes, msg: Dict, generation: Optional[int] = None
+    ) -> None:
+        """Append a message to the companion's history, which syncing never removes.
+
+        ``generation`` is ``history_generation`` as it was when the row was queued:
+        a row queued before a purge that has committed since is not written. A
+        reading the row lacks (``snr``, ``rssi``) is NULL, not 0.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO companion_message_history
+                    (companion_public_key, sender_key, recipient_key, txt_type, timestamp,
+                     text, is_channel, channel_idx, path_len, sender_prefix, snr, rssi,
+                     channel_data_type, channel_data_payload, packet_hash, expected_ack,
+                     created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        public_key,
+                        msg.get("sender_key", b""),
+                        msg.get("recipient_key", b""),
+                        msg.get("txt_type", 0),
+                        msg.get("timestamp", 0),
+                        msg.get("text", ""),
+                        int(msg.get("is_channel", False)),
+                        msg.get("channel_idx", 0),
+                        msg.get("path_len", 0),
+                        msg.get("sender_prefix", b"").hex(),
+                        msg.get("snr"),
+                        msg.get("rssi"),
+                        int(msg.get("channel_data_type") or 0),
+                        bytes(msg.get("channel_data_payload") or b""),
+                        msg.get("packet_hash") or None,
+                        msg.get("expected_ack"),
+                        time.time(),
+                    ),
+                )
+                # The INSERT holds the write lock, and a purge bumps the generation
+                # inside its own transaction, so a purge that committed after this
+                # row was queued has already bumped it.
+                if generation is not None and generation != self.history_generation:
+                    conn.rollback()
+                    return
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to record companion message history: {e}")
+
+    def companion_load_history(
+        self, public_key: bytes, since_id: int, limit: int
+    ) -> Optional[List[Dict]]:
+        """Load history after ``since_id``, oldest first (``id`` ascending).
+
+        Returns [] when there is none, or None when the read failed — callers
+        must not treat a failed read as "no messages".
+        """
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    """
+                    SELECT id, sender_key, recipient_key, txt_type, timestamp, text, is_channel,
+                           channel_idx, path_len, sender_prefix, snr, rssi, channel_data_type,
+                           channel_data_payload, packet_hash, expected_ack, created_at
+                    FROM companion_message_history
+                    WHERE companion_public_key = ? AND id > ?
+                    ORDER BY id ASC LIMIT ?
+                    """,
+                    (public_key, since_id, limit),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to load companion message history: {e}")
             return None

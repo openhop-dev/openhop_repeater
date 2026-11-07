@@ -342,7 +342,10 @@ class PacketRouter:
         """
         delivered = False
         authenticated = False
-        for bridge in bridges.values():
+        # A snapshot: ``bridges`` can be the daemon's live dict, and a companion
+        # added or deleted during the await below would otherwise end the loop
+        # with "dictionary changed size during iteration".
+        for bridge in list(bridges.values()):
             try:
                 result = await bridge.process_received_packet(packet)
             except Exception as e:
