@@ -793,3 +793,46 @@ def test_policy_engine_channel_decryptable_uses_channel_hash_group_secret():
 
     assert decision.matched is True
     assert decision.action == "drop"
+
+
+def test_policy_engine_decrypt_cache_does_not_leak_across_evaluations():
+    # Regression for #520 (from PR #413): id() is reused once a packet is freed.
+    channel_secret = (b"cache-secret" + b"\x00" * 32)[:32].hex()
+    other_secret = (b"cache-other" + b"\x00" * 32)[:32].hex()
+    decryptable = PacketBuilder.create_group_datagram(
+        group_name="ops",
+        local_identity=LocalIdentity(),
+        message="hello from cache test",
+        sender_name="Alice",
+        channels_config=[{"name": "ops", "secret": channel_secret}],
+    )
+    undecryptable = PacketBuilder.create_group_datagram(
+        group_name="ops",
+        local_identity=LocalIdentity(),
+        message="different payload",
+        sender_name="Eve",
+        channels_config=[{"name": "ops", "secret": other_secret}],
+    )
+    engine = PolicyEngine(
+        {
+            "enabled": True,
+            "default_action": "allow",
+            "objects": {"channels": {"ops": {"secret": channel_secret}}},
+            "rules": [
+                {
+                    "id": 1,
+                    "enabled": True,
+                    "if": {"all": [{"field": "channel_sender", "op": "equals", "value": "Alice"}]},
+                    "then": {"action": "drop"},
+                }
+            ],
+        }
+    )
+
+    with patch("repeater.policy_engine.id", create=True, return_value=424242):
+        first = engine.evaluate(undecryptable, {"payload_type": undecryptable.get_payload_type()})
+        second = engine.evaluate(decryptable, {"payload_type": decryptable.get_payload_type()})
+
+    assert first.matched is False
+    assert second.matched is True
+    assert second.action == "drop"

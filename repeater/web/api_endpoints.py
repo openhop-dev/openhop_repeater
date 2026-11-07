@@ -14,6 +14,7 @@ from typing import Callable, Optional
 import cherrypy
 import yaml
 from openhop_core.protocol import CryptoUtils
+from openhop_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
 
 from repeater import __version__
 from repeater.companion.identity_resolve import (
@@ -48,6 +49,16 @@ from .update_endpoints import UpdateAPIEndpoints
 
 logger = logging.getLogger("HTTPServer")
 REDACTED_CONFIG_VALUE = "*** REDACTED ***"
+
+
+def _redact_mqtt_broker_passwords(mqtt_brokers):
+    """Copy of an mqtt_brokers section with each broker password replaced by the sentinel."""
+    redacted = copy.deepcopy(mqtt_brokers)
+    for broker in redacted.get("brokers") or []:
+        if isinstance(broker, dict) and broker.get("password"):
+            broker["password"] = REDACTED_CONFIG_VALUE
+    return redacted
+
 
 POLICY_GROUP_KINDS = {
     "channel_hash": "channel_hashes",
@@ -136,6 +147,8 @@ POLICY_GROUP_KINDS = {
 # GET    /api/unscoped_flood_policy - Get unscoped flood policy
 # POST   /api/unscoped_flood_policy - Update unscoped flood policy
 # POST   /api/ping_neighbor - Ping a neighbor node
+# POST   /api/trace - Trace an explicit direct multi-hop path
+# GET    /api/trace_info - Return local identity hashes usable by TRACE
 # POST   /api/discover_neighbors_start - Start a live repeater discovery session
 # GET    /api/discover_neighbors_stream?session_id=X - Stream repeater discovery results over SSE
 # POST   /api/add_discovered_neighbor - Persist a discovered node into the neighbors/adverts table
@@ -1840,6 +1853,12 @@ class APIEndpoints:
     def stats(self):
         try:
             stats = self.stats_getter() if self.stats_getter else {}
+            if isinstance(stats.get("config", {}).get("mqtt_brokers"), dict):
+                # The engine embeds the live section. Send broker passwords as the
+                # sentinel, which update_mqtt_config turns back into the stored one.
+                stats["config"]["mqtt_brokers"] = _redact_mqtt_broker_passwords(
+                    stats["config"]["mqtt_brokers"]
+                )
             runtime_config = normalize_modem_config(self.config, warn=False)
             redact_modem_tokens_in_place(runtime_config)
             # Include active radio configuration in stats so UI can hydrate
@@ -2795,6 +2814,7 @@ class APIEndpoints:
                             },
                             "format": conn.format,
                             "neighbors": getattr(conn, "neighbors_enabled", False),
+                            "sent": dict(conn.sent),
                         }
                     )
 
@@ -3235,6 +3255,14 @@ class APIEndpoints:
                     for existing in (self.config.get("mqtt_brokers", {}) or {}).get("brokers", [])
                     if isinstance(existing, dict) and existing.get("name")
                 }
+                # A name two brokers share maps to None, so neither gets the other's.
+                stored_passwords_by_name = {}
+                for existing in (self.config.get("mqtt_brokers", {}) or {}).get("brokers", []):
+                    if isinstance(existing, dict) and existing.get("name"):
+                        name = str(existing.get("name"))
+                        stored_passwords_by_name[name] = (
+                            None if name in stored_passwords_by_name else existing.get("password")
+                        )
 
                 validated = []
                 for i, b in enumerate(brokers):
@@ -3295,7 +3323,20 @@ class APIEndpoints:
                     else:
                         new_broker["use_jwt_auth"] = False
                         new_broker["username"] = b.get("username", None)
-                        new_broker["password"] = b.get("password", None)
+                        password = b.get("password", None)
+                        if password == REDACTED_CONFIG_VALUE:
+                            # /api/stats sends this in place of the stored password;
+                            # previous_name lets a renamed broker keep it.
+                            lookup_name = str(b.get("previous_name") or new_broker["name"]).strip()
+                            password = stored_passwords_by_name.get(lookup_name)
+                            if not password:
+                                return self._error(f"Broker at index {i}: enter its password again")
+                        elif isinstance(password, str) and REDACTED_CONFIG_VALUE in password:
+                            return self._error(
+                                f"Broker at index {i}: clear the password field before "
+                                "entering a new password"
+                            )
+                        new_broker["password"] = password
 
                     validated.append(new_broker)
 
@@ -3941,6 +3982,30 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    def network_usage(self, days=None, hours=None):
+        """Persisted complete-minute usage; available only below authenticated /api."""
+        if cherrypy.request.method != "GET":
+            cherrypy.response.headers["Allow"] = "GET"
+            cherrypy.response.status = 405
+            return self._error("Method not allowed. This endpoint requires GET.")
+        if days is not None and hours is not None:
+            cherrypy.response.status = 400
+            return self._error("Specify either hours or days, not both")
+        if days is not None and str(days) not in {str(value) for value in range(1, 8)}:
+            cherrypy.response.status = 400
+            return self._error("days must be an integer between 1 and 7")
+        if hours is not None and str(hours) not in {str(value) for value in range(1, 169)}:
+            cherrypy.response.status = 400
+            return self._error("hours must be an integer between 1 and 168")
+        selected_hours = int(hours) if hours is not None else int(days or 1) * 24
+        try:
+            return self._get_storage().network_usage.snapshot(hours=selected_hours)
+        except Exception:  # noqa: BLE001 - never expose storage exception details
+            cherrypy.response.status = 503
+            return self._error("Network usage history unavailable")
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
     def packet_stats(self, hours=24):
         try:
             hours = int(hours)
@@ -4296,7 +4361,8 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def rrd_data(self):
+    def rrd_data(self, **kwargs):
+        # CherryPy dispatches query parameters as keywords before _get_params reads them.
         try:
             params = self._get_params(
                 {"start_time": None, "end_time": None, "resolution": "average"}
@@ -5975,6 +6041,212 @@ class APIEndpoints:
             raise
         except Exception as e:
             logger.error(f"Error pinging neighbor: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def trace(self):
+        """Send a direct TRACE packet over an explicit multi-hop path."""
+
+        self._set_cors_headers()
+
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            self._require_post()
+            data = cherrypy.request.json or {}
+            raw_path = data.get("path")
+            if not isinstance(raw_path, list) or not raw_path:
+                return self._error("path must be a non-empty array")
+
+            try:
+                timeout = int(data.get("timeout", 15))
+            except (TypeError, ValueError):
+                return self._error("timeout must be an integer")
+            if timeout < 1 or timeout > 120:
+                return self._error("timeout must be between 1 and 120 seconds")
+
+            configured_mode = self.config.get("mesh", {}).get("path_hash_mode", 0)
+            try:
+                path_hash_mode = int(data.get("path_hash_mode", configured_mode))
+            except (TypeError, ValueError):
+                return self._error("path_hash_mode must be 0, 1, or 2")
+            if path_hash_mode not in (0, 1, 2):
+                return self._error("path_hash_mode must be 0, 1, or 2")
+
+            # TRACE flags use MeshCore's exponent encoding: 1, 2, or 4 bytes
+            # per hop for flags 0, 1, or 2. This differs from the ordinary
+            # packet path hash mode, whose mode 2 means three bytes; a 3-byte
+            # config therefore defaults to 4-byte TRACE hashes.
+            byte_count = 1 << path_hash_mode
+            hex_chars = byte_count * 2
+            # On-air hops are the remote hops plus the closing local hop; 9 = tag+auth+flags.
+            max_wire_hops = min(MAX_PATH_SIZE - 1, (MAX_PACKET_PAYLOAD - 9) // byte_count)
+            max_remote_hops = max_wire_hops - 1
+            if len(raw_path) > max_remote_hops:
+                return self._error(
+                    f"path cannot contain more than {max_remote_hops} hops "
+                    f"for {byte_count}-byte hashes"
+                )
+
+            path_values = []
+            max_hash = (1 << (byte_count * 8)) - 1
+            for hop in raw_path:
+                if isinstance(hop, str):
+                    digits = hop[2:] if hop.lower().startswith("0x") else hop
+                    if len(digits) != hex_chars or not all(
+                        c in "0123456789abcdefABCDEF" for c in digits
+                    ):
+                        return self._error(
+                            f"Invalid path hop {hop!r}: expected {hex_chars} hex characters"
+                        )
+                    value = int(digits, 16)
+                elif isinstance(hop, int) and not isinstance(hop, bool):
+                    value = hop
+                else:
+                    return self._error(f"Invalid path hop: {hop!r}")
+                if value < 0 or value > max_hash:
+                    return self._error(f"Each path hop must be a valid {byte_count}-byte hash")
+                path_values.append(value)
+
+            # The API accepts only the remote hops; the local repeater owns
+            # route closure so callers need not know or send their own hash.
+            if not self.daemon_instance or not getattr(
+                self.daemon_instance, "local_identity", None
+            ):
+                return self._error("Local repeater identity not available")
+            public_key = bytes(self.daemon_instance.local_identity.get_public_key())
+            local_hash = int.from_bytes(public_key[:byte_count], "big")
+            # Callers supply route hops; local endpoints are API-owned.
+            # Do not reject or reinterpret values that happen to equal local_hash.
+            path_values = [local_hash, *path_values, local_hash]
+
+            trace_flags = path_hash_mode
+            # Injection transmits immediately; the origin is not an RF hop.
+            path_bytes = b"".join(value.to_bytes(byte_count, "big") for value in path_values[1:])
+            target_hash = path_values[-1]
+
+            if not hasattr(self.daemon_instance, "router"):
+                return self._error("Packet router not available")
+            router = self.daemon_instance.router
+            if not hasattr(self.daemon_instance, "trace_helper"):
+                return self._error("Trace helper not available")
+            trace_helper = self.daemon_instance.trace_helper
+
+            trace_tag = secrets.randbits(32)
+            from openhop_core.protocol import PacketBuilder
+
+            packet = PacketBuilder.create_trace(
+                tag=trace_tag,
+                auth_code=0x12345678,
+                flags=trace_flags,
+                path=list(path_bytes),
+            )
+
+            import asyncio
+
+            async def send_and_wait():
+                event = trace_helper.register_trace(trace_tag, path_bytes, trace_flags, timeout)
+                if not await router.inject_packet(packet):
+                    raise RuntimeError("Trace packet could not be transmitted")
+                logger.info(
+                    "Trace sent over %s hops to 0x%0*x (path_hash_mode=%s, tag=%s)",
+                    len(path_values),
+                    hex_chars,
+                    target_hash,
+                    path_hash_mode,
+                    trace_tag,
+                )
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=timeout)
+                    return True
+                except asyncio.TimeoutError:
+                    return False
+
+            try:
+                if self.event_loop is None:
+                    return self._error("Event loop not available")
+                future = asyncio.run_coroutine_threadsafe(send_and_wait(), self.event_loop)
+                response_received = future.result(timeout=timeout + 1)
+            except Exception as e:
+                logger.error("Error waiting for trace response: %s", e)
+                trace_helper.pending_pings.pop(trace_tag, None)
+                return self._error(f"Error waiting for response: {e}")
+
+            if not response_received:
+                trace_helper.pending_pings.pop(trace_tag, None)
+                return self._error(f"Trace timeout after {timeout}s")
+
+            trace_info = trace_helper.pending_pings.pop(trace_tag, None)
+            if not trace_info:
+                return self._error("Trace info not found after response")
+            result = trace_info.get("result")
+            if not result:
+                return self._error("Received trace response but no data")
+
+            if result.get("trace_hops"):
+                grouped_path = [int.from_bytes(bytes(hop), "big") for hop in result["trace_hops"]]
+            else:
+                raw_result_path = result.get("path", [])
+                grouped_path = [
+                    int.from_bytes(bytes(raw_result_path[i : i + byte_count]), "big")
+                    for i in range(0, len(raw_result_path), byte_count)
+                ]
+
+            return self._success(
+                {
+                    "requested_path": [f"0x{value:0{hex_chars}x}" for value in path_values],
+                    "path": [f"0x{value:0{hex_chars}x}" for value in [local_hash, *grouped_path]],
+                    "path_snrs": result.get("path_snrs", []),
+                    "rtt_ms": round(
+                        (result["received_at"] - trace_info["sent_at"]) * 1000,
+                        2,
+                    ),
+                    "snr_db": result["snr"],
+                    "rssi": result["rssi"],
+                    "tag": trace_tag,
+                    "path_hash_mode": path_hash_mode,
+                },
+                message="Trace successful",
+            )
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error("Error tracing path: %s", e, exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def trace_info(self):
+        """Return the local repeater hashes supported by the TRACE endpoint."""
+
+        self._set_cors_headers()
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+        try:
+            if not self.daemon_instance or not getattr(
+                self.daemon_instance, "local_identity", None
+            ):
+                return self._error("Local repeater identity not available")
+            public_key = bytes(self.daemon_instance.local_identity.get_public_key())
+            return self._success(
+                {
+                    "hashes": {
+                        str(
+                            byte_count
+                        ): f"0x{int.from_bytes(public_key[:byte_count], 'big'):0{byte_count * 2}x}"
+                        for byte_count in (1, 2, 4)
+                    },
+                    "path_hash_modes": {"1": 0, "2": 1, "4": 2},
+                }
+            )
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error("Error getting trace info: %s", e, exc_info=True)
             return self._error(str(e))
 
     @cherrypy.expose
@@ -8669,6 +8941,11 @@ class APIEndpoints:
 
                 redact_modem_tokens_in_place(exported, replacement=REDACTED_CONFIG_VALUE)
 
+                if isinstance(exported.get("mqtt_brokers"), dict):
+                    exported["mqtt_brokers"] = _redact_mqtt_broker_passwords(
+                        exported["mqtt_brokers"]
+                    )
+
                 # Redact identity keys in companion / room_server configs
                 for section in ("room_servers", "companions"):
                     entries = exported.get("identities", {}).get(section, []) or []
@@ -8922,6 +9199,22 @@ class APIEndpoints:
                             if entry.get("identity_key") == "*** REDACTED ***":
                                 existing = cur_by_name.get(entry.get("name"), {})
                                 entry["identity_key"] = existing.get("identity_key", "")
+
+                if section == "mqtt_brokers" and isinstance(value, dict):
+                    # Preserve broker passwords that are redacted
+                    cur_brokers = (self.config.get("mqtt_brokers") or {}).get("brokers") or []
+                    cur_by_name = {}
+                    for b in cur_brokers:
+                        if isinstance(b, dict):
+                            # A name two brokers share restores neither password.
+                            cur_by_name[b.get("name")] = {} if b.get("name") in cur_by_name else b
+                    for broker in value.get("brokers") or []:
+                        if (
+                            isinstance(broker, dict)
+                            and broker.get("password") == REDACTED_CONFIG_VALUE
+                        ):
+                            existing = cur_by_name.get(broker.get("name"), {})
+                            broker["password"] = existing.get("password", "")
 
                 if section == "mqtt" and isinstance(value, dict):
                     # Backward compatibility: treat legacy "mqtt" section as

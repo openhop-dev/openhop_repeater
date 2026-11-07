@@ -195,7 +195,12 @@ class _BrokerConnection:
         node_name: str,
         on_connect_callback: Optional[Callable] = None,
         on_disconnect_callback: Optional[Callable] = None,
+        usage_recorder: Callable | None = None,
     ):
+        from .network_usage import broker_identity
+
+        self._usage_recorder = usage_recorder
+        self._usage_source = broker_identity(broker)
         self.broker = broker
         self.local_identity = local_identity
         self.public_key = public_key.upper()
@@ -265,6 +270,10 @@ class _BrokerConnection:
         # below for the same hazard. This is the openhop equivalent of the
         # firmware's packets-only MeshRank exclusion.
         self.neighbors_enabled = bool(broker.get("neighbors", False))
+        # Payload bytes paho accepted since the service started; topic, protocol overhead,
+        # keepalives and resends are not counted. Callers of publish() hold the pusher's _lock.
+        self._sent_lock = threading.Lock()
+        self._sent = {"messages": 0, "payload_bytes": 0}
 
         self._tls_verified = False
 
@@ -564,12 +573,21 @@ class _BrokerConnection:
             qos = 1 if self.retain_status else 0
 
         full_topic = f"{self.base_topic}/{subtopic}"
+        size = len(payload.encode("utf-8"))
         _trace(
-            f"Publishing topic='{_truncate_middle(full_topic)}', bytes={len(payload.encode('utf-8'))}, "
+            f"Publishing topic='{_truncate_middle(full_topic)}', bytes={size}, "
             f"running={self._running}, retain={retain}, qos={qos}"
         )
         if self._running:
             result = self.client.publish(full_topic, payload, retain=retain, qos=qos)
+            if getattr(result, "rc", None) == mqtt.MQTT_ERR_SUCCESS:
+                with self._sent_lock:
+                    self._sent["messages"] += 1
+                    self._sent["payload_bytes"] += size
+                if self._usage_recorder:
+                    self._usage_recorder(
+                        self._usage_source, self.broker.get("name", "MQTT"), payload
+                    )
             return result
         else:
             logger.warning(f"Cannot publish to {self.broker['name']} - not connected")
@@ -578,6 +596,12 @@ class _BrokerConnection:
     def is_enabled(self) -> bool:
         """Check if connection is enabled"""
         return self.enabled
+
+    @property
+    def sent(self) -> dict:
+        """Consistent session counters; callers cannot mutate internal accounting."""
+        with self._sent_lock:
+            return dict(self._sent)
 
     def is_connected(self) -> bool:
         """Check if connection is active"""
@@ -643,6 +667,7 @@ class MeshCoreToMqttPusher:
         jwt_expiry_minutes: int = 10,
         stats_provider: Optional[Callable[[], dict]] = None,
         radio_stats_provider: Optional[Callable[[], dict]] = None,
+        usage_recorder: Callable | None = None,
     ):
         self.config = config
         # Store local identity and get public key
@@ -758,6 +783,7 @@ class MeshCoreToMqttPusher:
                 node_name=self.node_name,
                 on_connect_callback=self._on_broker_connected,
                 on_disconnect_callback=self._on_broker_disconnected,
+                usage_recorder=usage_recorder,
             )
             self.connections.append(conn)
 

@@ -11,7 +11,10 @@ to end. paho-mqtt's network layer is mocked so no real broker is required.
 """
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import paho.mqtt.client as mqtt
 
 from repeater.airtime import AirtimeManager
 from repeater.data_acquisition.mqtt_handler import MeshCoreToMqttPusher
@@ -272,3 +275,25 @@ def test_mqtt_published_packet_legacy_mqtt_format_uses_supplied_base_topic():
     assert len(captured) == 1
     # Legacy `mqtt` format still uses singular subtopic, but custom base prefix.
     assert captured[0]["topic"] == "site/edge/gw1/packet"
+
+
+def test_broker_counts_only_publishes_paho_accepted():
+    """A publish paho refused is not counted in ``sent``."""
+    pusher = MeshCoreToMqttPusher(local_identity=_FakeIdentity("CD" * 32), config=_make_config())
+    conn = pusher.connections[0]
+    rcs = iter([mqtt.MQTT_ERR_SUCCESS, mqtt.MQTT_ERR_NO_CONN])
+    payloads = []
+
+    def _publish(topic, payload, retain=False, qos=0):
+        payloads.append(payload)
+        return SimpleNamespace(rc=next(rcs))
+
+    conn._running = True
+    conn.client = MagicMock()
+    conn.client.publish = _publish
+
+    pusher.publish_status(state="online")
+    pusher.publish_status(state="online")
+
+    assert len(payloads) == 2
+    assert conn.sent == {"messages": 1, "payload_bytes": len(payloads[0].encode("utf-8"))}
