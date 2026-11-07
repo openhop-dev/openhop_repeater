@@ -613,8 +613,11 @@ class TextHelper:
                                 return
 
                             # Handle CLI command
-                            reply = room_server.cli.handle_command(
-                                sender_pubkey=sender_pubkey, command=message_text, is_admin=is_admin
+                            reply = await asyncio.to_thread(
+                                room_server.cli.handle_command,
+                                sender_pubkey=sender_pubkey,
+                                command=message_text,
+                                is_admin=is_admin,
                             )
 
                             logger.info(
@@ -726,8 +729,11 @@ class TextHelper:
                         return
 
                     # Handle CLI command
-                    reply = self.cli.handle_command(
-                        sender_pubkey=sender_pubkey, command=message_text, is_admin=is_admin
+                    reply = await asyncio.to_thread(
+                        self.cli.handle_command,
+                        sender_pubkey=sender_pubkey,
+                        command=message_text,
+                        is_admin=is_admin,
                     )
 
                     logger.info(

@@ -2750,12 +2750,19 @@ class RepeaterHandler(BaseHandler):
 
         Baselines are per radio: a shared one would charge every radio's errors
         to whichever was sampled last and report swings that never happened.
+
+        A radio whose counter lives on a modem (KISS: GetStats) is polled first,
+        off the event loop; the others keep their count current on their own.
         """
         if not self.storage:
             return
 
+        loop = asyncio.get_running_loop()
         for index, (radio_id, radio) in enumerate(self._sampling_radios()):
             try:
+                refresh = getattr(radio, "refresh_crc_error_count", None)
+                if callable(refresh):
+                    await loop.run_in_executor(None, refresh)
                 current = int(getattr(radio, "crc_error_count", 0) or 0) if radio else 0
                 delta = current - self._crc_error_baselines.get(radio_id, 0)
                 if delta > 0:

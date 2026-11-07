@@ -5,12 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openhop_core.hardware import protocol_constants as modem_protocol
+from openhop_core.hardware.tcp_radio import TCPLoRaRadio
+from openhop_core.hardware.usb_radio import USBLoRaRadio
 from openhop_core.node.handlers.result import HandlerResult
 from openhop_core.node.handlers.text import TXT_ACK_DELAY_MS
 from openhop_core.protocol import Identity, LocalIdentity
 from openhop_core.protocol.constants import PAYLOAD_TYPE_ACK
 from openhop_core.protocol.packet_builder import PacketBuilder
 
+from repeater.config_manager import ConfigManager
 from repeater.handler_helpers.acl import (
     ACL,
     PERM_ACL_ADMIN,
@@ -18,6 +22,7 @@ from repeater.handler_helpers.acl import (
     ClientInfo,
 )
 from repeater.handler_helpers.path import PathHelper
+from repeater.handler_helpers.mesh_cli import MeshCLI
 from repeater.handler_helpers.protocol_request import ProtocolRequestHelper
 from repeater.handler_helpers.text import CORE_ACCEPTS_ACK_POLICY, TextHelper, _may_ack
 
@@ -577,6 +582,102 @@ def _repeater_cli_helper():
     helper._check_admin_permission_for_identity = MagicMock(return_value=True)
     helper._send_cli_reply = AsyncMock()
     return helper
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("radio_cls", [TCPLoRaRadio, USBLoRaRadio])
+@pytest.mark.parametrize("identity_type", ["repeater", "room_server"])
+@pytest.mark.parametrize(
+    "command,reply_cmd,payload,key,value,reply",
+    [
+        (
+            "set agc.reset.interval 30",
+            modem_protocol.CMD_AGC_INTERVAL_RESP,
+            struct.pack("<H", 30),
+            "agc_reset_interval_seconds",
+            30,
+            "OK",
+        ),
+        (
+            "set radio.fem.rxgain on",
+            modem_protocol.CMD_FEM_STATE_RESP,
+            b"\x03\x01",
+            "fem_rx_gain",
+            True,
+            "OK",
+        ),
+        (
+            "set radio.fem.txgain on",
+            modem_protocol.CMD_FEM_STATE_RESP,
+            b"\x03\x02",
+            "fem_tx_gain",
+            True,
+            "OK",
+        ),
+        (
+            "set radio.rxgain off",
+            modem_protocol.CMD_RX_BOOST_RESP,
+            b"\x00",
+            "rx_boosted_gain",
+            False,
+            "OK",
+        ),
+        (
+            "get agc.reset.interval",
+            modem_protocol.CMD_AGC_INTERVAL_RESP,
+            struct.pack("<H", 30),
+            None,
+            None,
+            "> 30",
+        ),
+        (
+            "get radio.fem.rxgain",
+            modem_protocol.CMD_FEM_STATE_RESP,
+            b"\x03\x01",
+            None,
+            None,
+            "> on",
+        ),
+        ("get radio.rxgain", modem_protocol.CMD_RX_BOOST_RESP, b"\x00", None, None, "> off"),
+    ],
+)
+async def test_mesh_frontend_commands_use_worker_and_confirm_modem_reply(
+    radio_cls, identity_type, command, reply_cmd, payload, key, value, reply
+):
+    loop = asyncio.get_running_loop()
+    radio = radio_cls("unused")
+    section = "modem_tcp" if radio_cls is TCPLoRaRadio else "modem_usb"
+    if radio_cls is TCPLoRaRadio:
+        radio._sock = object()
+    else:
+        radio._serial = SimpleNamespace(is_open=True)
+    radio.set_event_loop(loop)
+
+    def write(frame):
+        if frame[1] == modem_protocol.CMD_GET_RF_CAPS:
+            loop.call_soon(
+                radio._dispatch_frame, modem_protocol.CMD_RF_CAPS_RESP, struct.pack("<I", 15)
+            )
+        else:
+            loop.call_soon(radio._dispatch_frame, reply_cmd, payload)
+
+    radio._rf_write_frame = write
+    config = {"radio_type": section, section: {}, "repeater": {}}
+    manager = ConfigManager("/tmp/not-written.yaml", config, SimpleNamespace(radio=radio))
+    manager.save_to_file = MagicMock(return_value=True)
+    cli = MeshCLI("/tmp/not-written.yaml", config, manager)
+    if identity_type == "repeater":
+        helper = _repeater_cli_helper()
+        helper.cli = cli
+    else:
+        helper, room = _room_helper()
+        room.cli = cli
+    await asyncio.wait_for(_deliver(helper, _TxtPacket(command, 1), identity_type), timeout=1)
+    assert helper._send_cli_reply.await_args.args[1] == reply
+    if key is not None:
+        assert config[section][key] == value
+        assert radio.radio_config[key] == value
+        manager.save_to_file.assert_called_once()
 
 
 @pytest.mark.asyncio

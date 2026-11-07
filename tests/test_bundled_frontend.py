@@ -42,6 +42,16 @@ def test_distributed_system_stats_includes_merged_network_usage():
         assert label in javascript
 
 
+def test_bundle_includes_the_radio_front_end_controls():
+    # The AGC/FEM controls for KISS and openHop modems (RepeaterUI #113), served
+    # from /api/radio_frontend. A rebuild from a UI that predates them would drop
+    # them silently.
+    javascript = reachable_javascript(BUNDLE)
+    assert "/radio_frontend" in javascript, "Backend ships a UI without the radio front-end page"
+    for label in ("AGC reset interval", "FEM RX gain", "FEM TX gain (PA)"):
+        assert label in javascript
+
+
 def test_bundle_has_verifiable_source_and_file_manifest():
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/check_frontend_bundle.py")],
