@@ -551,6 +551,47 @@ def test_waveshare_ups_e_sensor_reads_pack_state(monkeypatch):
     assert "time_to_empty_min" not in reading["data"]
 
 
+def test_waveshare_ups_e_sensor_reads_discharge_current_as_signed_16_bit(monkeypatch):
+    class _Bus:
+        def __init__(self, bus_number):
+            self.bus_number = bus_number
+
+        def read_i2c_block_data(self, addr, register, length):
+            values = {
+                waveshare_ups_e_module._REG_STATUS: [0x00],
+                waveshare_ups_e_module._REG_VBUS: [0x00] * 6,
+                # Battery current 0xFFFF is -1 mA (registers 0x22-0x23, signed 16-bit).
+                waveshare_ups_e_module._REG_BATT: [
+                    0x80,
+                    0x3E,
+                    0xFF,
+                    0xFF,
+                    0x4E,
+                    0x00,
+                    0x98,
+                    0x08,
+                    0x2D,
+                    0x00,
+                    0x5A,
+                    0x00,
+                ],
+                waveshare_ups_e_module._REG_CELLS: [0x80, 0x0C, 0x6C, 0x0C, 0x1C, 0x0C, 0x76, 0x0C],
+            }
+            return values[register]
+
+        def close(self):
+            return None
+
+    _install_fake_smbus2(monkeypatch, _Bus)
+
+    reading = WaveshareUpsESensor("battery").read()
+
+    assert reading["ok"] is True
+    assert reading["data"]["battery_current_ma"] == -1
+    assert reading["data"]["time_to_empty_min"] == 45
+    assert "time_to_full_min" not in reading["data"]
+
+
 def test_lafvin_pack_voltage_to_percent_piecewise_bounds():
     assert lafvin_ups_3s_module._pack_voltage_to_percent(12.6) == 100
     assert lafvin_ups_3s_module._pack_voltage_to_percent(12.0) == 85
@@ -629,3 +670,28 @@ def test_lafvin_sensor_read_wraps_bus_failures(monkeypatch):
     reading = LafvinUps3sSensor("battery").read()
     assert reading["ok"] is False
     assert "LAFVIN UPS 3S read failed" in reading["error"]
+
+
+@pytest.mark.parametrize(
+    "sensor_class",
+    [
+        BME280Sensor,
+        ENS210Sensor,
+        INA219Sensor,
+        LafvinUps3sSensor,
+        SHTC3Sensor,
+        WaveshareUpsDSensor,
+        WaveshareUpsESensor,
+    ],
+)
+def test_i2c_sensor_schema_defaults_build_the_sensor_its_code_defaults_build(
+    monkeypatch, sensor_class
+):
+    monkeypatch.setattr(SensorBase, "ensure_python_modules", lambda self, modules: False)
+    defaults = {s["key"]: s["default"] for s in sensor_class._settings_schema}
+
+    from_schema = sensor_class("sensor", {"settings": defaults})
+    from_code = sensor_class("sensor")
+
+    assert from_schema.i2c_address == from_code.i2c_address
+    assert from_schema.bus_number == from_code.bus_number
