@@ -59,6 +59,66 @@ Real-time packet statistics, neighbor discovery, and system status.
 
 Historical statistics and performance metrics.
 
+## Network and MQTT usage
+
+The matching RepeaterUI feature adds **Network and MQTT usage** to the existing
+**System Stats** page. Select a rolling 1-hour, 6-hour, 24-hour (default), 2-day or
+1-week window and one network interface
+to see upload/download totals. MQTT lists locally accepted published payload
+bytes and messages per broker, plus the combined total. Display units scale as
+**B, KB, MB, GB** (decimal bytes, not bits).
+
+History is collected automatically while Repeater runs and stored as minute
+buckets in the existing `repeater.db`, retaining eight days. The current minute
+is excluded; allow up to two minutes after first startup for complete-minute
+history to appear. No Prometheus installation is required. The authenticated
+read-only API is `GET /api/network_usage?hours=24` (`hours`: integer 1–168).
+All windows are rolling durations, not calendar periods; omitting the duration
+defaults to 24 hours. The legacy `days` query (integer 1–7) remains supported but
+is deprecated; supplying both `hours` and `days` returns HTTP 400. Responses
+include integer `hours` and compatibility `days = hours / 24` (fractional for
+subday windows). Bounds remain minute-aligned and half-open, excluding the
+current minute. Existing history is reused without a reset or schema migration.
+
+- Interface usage covers the visible network namespace: a Docker/LXC install
+  measures container-visible traffic, not the entire physical host. Select the
+  uplink explicitly; adding bridge, VPN and physical interface totals can double
+  count the same traffic.
+- The API's nullable `default_interface` recommends the current default-route
+  interface only when it is a returned history source and its NIC is currently
+  up and non-loopback. Clients may use it for initial selection only, never to
+  override a manual choice. It is not chosen by traffic volume or NIC name.
+  Discovery reads Linux namespace `/proc/net/route` and `/proc/net/ipv6_route`
+  with a 256 KiB cap per file. It requires up, non-reject routes, selects the
+  minimum metric separately per family, and returns null for tied interfaces,
+  differing IPv4/IPv6 winners, source-specific defaults, active split-default
+  `/1` routes, malformed/unreadable/oversized tables, or unsupported platforms.
+  This is a best-effort main-table hint, not a complete policy-routing lookup:
+  source rules, additional routing tables and destination-specific VPN routing
+  can choose another interface. Check the uplink manually for those setups;
+  route and NIC state can also change immediately after discovery.
+- `/api/mqtt_status` also exposes Treehouse-00's compatible per-broker `sent`
+  object (`messages`, `payload_bytes`) for API clients that need current-session
+  counts. These reset when the connection object is recreated or the service
+  restarts, survive ordinary reconnects, and exclude Glass's separate client.
+  Both values are read atomically as one copied snapshot. They use the same
+  successful local-publish handoff as persistent history, not a second publish
+  or an extra addition to the rolling totals. Use `/api/network_usage` for the
+  selected rolling window, retained history and Glass totals.
+- MQTT figures count UTF-8 payload bytes accepted by the local MQTT client,
+  including status updates, separately for each broker copy. They do not confirm
+  broker receipt or include protocol/TLS/TCP overhead and retransmissions. Glass
+  MQTT telemetry is listed separately when enabled. Renaming a broker starts a
+  new usage source; retained history remains visible.
+- Partial windows are marked. Repeater downtime is not backfilled; counter
+  resets/reappearing interfaces establish a fresh baseline. Abrupt process loss
+  can lose unflushed samples, and prolonged database failure discards bounded
+  pending data rather than retaining an unlimited queue.
+
+These figures help estimate a mobile-data allowance; the carrier/router meter
+remains the billing cross-check. Existing packet history cannot reconstruct
+usage before this feature began collecting it.
+
 ## Supported Hardware
 
 openHop Repeater supports these radio backends:

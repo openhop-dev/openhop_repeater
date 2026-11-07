@@ -708,6 +708,77 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /network_usage:
+    get:
+      tags: [System]
+      summary: Get measured network and MQTT usage
+      operationId: getNetworkUsage
+      servers:
+        - url: /api
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      description: >-
+        Persisted minute-resolution deltas in the current network namespace, retained
+        for eight days. Container deployments measure container-visible interfaces,
+        not whole-host traffic. Interfaces overlap (bridges, tunnels, loopback and
+        physical uplinks); select an interface rather than summing them. MQTT totals
+        are UTF-8 payload bytes/messages accepted locally by Paho across broker and
+        legacy publishers (including Glass telemetry), not transport bytes, broker
+        receipts or carrier billing. Overall MQTT totals derive from the broker rows.
+        No backfill before collection started. In-progress minute is excluded; start
+        and end are effective minute-aligned UNIX seconds with a half-open range.
+        Interface deltas are attributed to the sample-ending minute. Full coverage
+        requires uninterrupted sampling across each minute; startup, restart, counter
+        resets, interface changes, delayed/failed sampling and dropped pending data
+        leave partial history. Empty MQTT rows mean zero only when partial is false.
+        Values are persisted only, normally lagging collection by up to ten seconds.
+        Windows are rolling durations, defaulting to 24 hours. Specify hours or the
+        deprecated days parameter, never both. No history reset or migration is needed.
+      parameters:
+        - name: hours
+          in: query
+          required: false
+          description: Rolling duration in hours; defaults to 24 when neither parameter is supplied.
+          schema:
+            type: integer
+            default: 24
+            minimum: 1
+            maximum: 168
+        - name: days
+          in: query
+          required: false
+          deprecated: true
+          description: Legacy rolling duration in days; mutually exclusive with hours.
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 7
+      responses:
+        '200':
+          description: Direct usage object (no success/data envelope)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkUsage'
+        '400':
+          description: Invalid hours (integer 1–168), invalid days (integer 1–7), or both parameters supplied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+        '405':
+          description: Only GET is supported
+        '503':
+          description: Usage history unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /packet_stats:
     get:
       tags: [Packets]
@@ -4078,6 +4149,7 @@ paths:
     get:
       tags: [System]
       summary: Get MQTT runtime status
+      description: Per-broker sent counters are session-only and reset when the broker connection is recreated or the service restarts. They count locally accepted payload bytes, not confirmed delivery or network overhead. For persistent rolling totals, including Glass telemetry, use /network_usage.
       responses:
         '200':
           description: MQTT status
@@ -4085,6 +4157,41 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      handler_active:
+                        type: boolean
+                      brokers:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            name:
+                              type: string
+                            host:
+                              type: string
+                            format:
+                              type: string
+                            neighbors:
+                              type: boolean
+                            status:
+                              type: object
+                              properties:
+                                connected:
+                                  type: boolean
+                                reconnecting:
+                                  type: boolean
+                            sent:
+                              $ref: '#/components/schemas/MqttSentCounters'
+                      neighbors:
+                        type: object
+                        nullable: true
 
   /broker_presets:
     get:
@@ -5913,6 +6020,130 @@ components:
                 type: string
                 enum: [unknown]
   schemas:
+
+    NetworkUsageInterface:
+      type: object
+      required: [source, name, upload_bytes, download_bytes, messages]
+      properties:
+        source:
+          type: string
+          description: Interface name in the current network namespace.
+        name:
+          type: string
+        upload_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        download_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        messages:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Always zero for interface counters.
+    NetworkUsageBroker:
+      type: object
+      required: [source, name, upload_bytes, messages]
+      properties:
+        source:
+          type: string
+          description: Opaque hash of nonsecret endpoint identity and broker name; independent of broker list ordering and credentials. Renaming a broker starts a new source.
+        name:
+          type: string
+          description: Configured broker label (Glass telemetry has its own label).
+        upload_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Locally accepted payload bytes only; not transport bytes or broker acknowledgement.
+        messages:
+          type: integer
+          format: int64
+          minimum: 0
+    MqttSentCounters:
+      type: object
+      description: Locally accepted outgoing message counts and UTF-8 payload bytes for this broker connection. Reset on connection recreation or service restart, not on a normal reconnect. Excludes topics, protocol overhead, retries and Glass's separate client; accepted messages are not guaranteed delivered.
+      required: [messages, payload_bytes]
+      properties:
+        messages:
+          type: integer
+          minimum: 0
+        payload_bytes:
+          type: integer
+          minimum: 0
+    NetworkUsage:
+      type: object
+      required: [hours, days, start, end, bucket_seconds, available_since, partial, scope, interfaces, default_interface, mqtt, collection]
+      properties:
+        hours:
+          type: integer
+          minimum: 1
+          maximum: 168
+          description: Effective rolling duration in hours.
+        days:
+          type: number
+          minimum: 0.041666666666666664
+          maximum: 7
+          description: Compatibility duration equal to hours / 24; fractional for subday windows.
+        start:
+          type: number
+          description: Inclusive effective UNIX seconds, minute aligned.
+        end:
+          type: number
+          description: Exclusive effective UNIX seconds, minute aligned; excludes current minute.
+        bucket_seconds:
+          type: integer
+          enum: [60]
+        available_since:
+          type: number
+          nullable: true
+          description: Earliest retained fully observed minute, not a guarantee of continuous coverage after that point. Null until one full minute is recorded.
+        partial:
+          type: boolean
+          description: True if any requested minute lacks certified collection coverage. Partial totals are observed lower bounds, not zero-filled estimates.
+        scope:
+          type: string
+        default_interface:
+          type: string
+          nullable: true
+          description: Best-effort current Linux main-table default-route recommendation, equal to a returned interfaces source whose NIC is currently up and nonloopback. Null for unavailable discovery, ambiguous routes, differing IPv4/IPv6 defaults or no matching source. Not a policy-routing or carrier-billing determination. Use only for initial selection; never override a manual selection.
+        interfaces:
+          type: array
+          description: Observed sources separately; do not sum overlapping interfaces automatically.
+          items:
+            $ref: '#/components/schemas/NetworkUsageInterface'
+        mqtt:
+          type: object
+          required: [brokers, upload_bytes, messages]
+          properties:
+            brokers:
+              type: array
+              items:
+                $ref: '#/components/schemas/NetworkUsageBroker'
+            upload_bytes:
+              type: integer
+              format: int64
+              minimum: 0
+            messages:
+              type: integer
+              format: int64
+              minimum: 0
+        collection:
+          type: object
+          required: [running, last_sample, error]
+          properties:
+            running:
+              type: boolean
+            last_sample:
+              type: number
+              nullable: true
+              description: Last successful interface sample UNIX seconds; null before first success.
+            error:
+              type: string
+              nullable: true
+              description: Sanitized collection/persistence error, never connection details or credentials.
 
     SensorMetricDescriptor:
       type: object
