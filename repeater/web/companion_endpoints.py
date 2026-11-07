@@ -495,7 +495,7 @@ class CompanionAPIEndpoints:
     @cherrypy.tools.json_out()
     @require_auth
     def send_text(self, **kwargs):
-        """POST /api/companion/send_text  {pub_key, text, txt_type?, attempt?, timestamp?, companion_name?}"""
+        """POST /api/companion/send_text  {pub_key, text, txt_type?, attempt?, timestamp?, wait_for_ack?, companion_name?}"""
         self._require_post()
         body = self._get_json_body()
         bridge = self._get_bridge(**self._resolve_bridge_params(body))
@@ -529,6 +529,11 @@ class CompanionAPIEndpoints:
             # (MyMesh.cpp CMD_SEND_TXT_MSG, companion-v1.18.0).
             if timestamp != 0 and txt_type not in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND):
                 send_args["timestamp"] = timestamp
+        # With wait_for_ack false, core answers once the packet is handed off, as
+        # it does for the frame server: `sent` then means transmitted, and the
+        # ACK arrives as send_confirmed on the event stream.
+        if not bool(body.get("wait_for_ack", True)):
+            send_args["wait_for_ack"] = False
         result = self._run_async(
             bridge.send_text_message(pub_key, text, txt_type=txt_type, **send_args)
         )
