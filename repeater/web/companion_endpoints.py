@@ -15,7 +15,9 @@ import time
 from typing import Callable, Optional
 
 import cherrypy
+from openhop_core.companion.base_config import normalize_flood_scope_key
 from openhop_core.companion.constants import DEFAULT_OFFLINE_QUEUE_SIZE
+from openhop_core.protocol.constants import TXT_TYPE_CLI_COMMAND, TXT_TYPE_CLI_DATA
 
 from repeater.companion.utils import (
     trim_companion_contacts_to_fit,
@@ -535,7 +537,7 @@ class CompanionAPIEndpoints:
     @cherrypy.tools.json_out()
     @require_auth
     def send_text(self, **kwargs):
-        """POST /api/companion/send_text  {pub_key, text, txt_type?, companion_name?}"""
+        """POST /api/companion/send_text  {pub_key, text, txt_type?, attempt?, timestamp?, wait_for_ack?, companion_name?}"""
         self._require_post()
         body = self._get_json_body()
         bridge = self._get_bridge(**self._resolve_bridge_params(body))
@@ -544,7 +546,39 @@ class CompanionAPIEndpoints:
         if not text:
             raise cherrypy.HTTPError(400, "text required")
         txt_type = int(body.get("txt_type", 0))
-        result = self._run_async(bridge.send_text_message(pub_key, text, txt_type=txt_type))
+        # A client retrying a message sends its timestamp and the next attempt,
+        # as CMD_SEND_TXT_MSG carries them.
+        send_args = {}
+        attempt = body.get("attempt")
+        if attempt is not None:
+            try:
+                attempt = int(attempt)
+            except (TypeError, ValueError):
+                raise cherrypy.HTTPError(400, "attempt must be an integer from 0 to 255")
+            if not 0 <= attempt <= 0xFF:
+                raise cherrypy.HTTPError(400, "attempt must be an integer from 0 to 255")
+            send_args["attempt"] = attempt
+        timestamp = body.get("timestamp")
+        if timestamp is not None:
+            try:
+                timestamp = int(timestamp)
+            except (TypeError, ValueError):
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            if not 0 <= timestamp <= 0xFFFFFFFF:
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            # As the frame server (_cmd_send_txt_msg): 0 means none was given, and
+            # the CLI types take a fresh one, as firmware stamps those with its RTC
+            # (MyMesh.cpp CMD_SEND_TXT_MSG, companion-v1.18.0).
+            if timestamp != 0 and txt_type not in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND):
+                send_args["timestamp"] = timestamp
+        # With wait_for_ack false, core answers once the packet is handed off, as
+        # it does for the frame server: `sent` then means transmitted, and the
+        # ACK arrives as send_confirmed on the event stream.
+        if not bool(body.get("wait_for_ack", True)):
+            send_args["wait_for_ack"] = False
+        result = self._run_async(
+            bridge.send_text_message(pub_key, text, txt_type=txt_type, **send_args)
+        )
         return self._success(
             {
                 "sent": result.success,
@@ -558,7 +592,7 @@ class CompanionAPIEndpoints:
     @cherrypy.tools.json_out()
     @require_auth
     def send_channel_message(self, **kwargs):
-        """POST /api/companion/send_channel_message  {channel_idx, text, companion_name?}"""
+        """POST /api/companion/send_channel_message  {channel_idx, text, timestamp?, flood_scope_key?, companion_name?}"""
         self._require_post()
         body = self._get_json_body()
         bridge = self._get_bridge(**self._resolve_bridge_params(body))
@@ -566,7 +600,30 @@ class CompanionAPIEndpoints:
         text = body.get("text", "")
         if not text:
             raise cherrypy.HTTPError(400, "text required")
-        success = self._run_async(bridge.send_channel_message(channel_idx, text))
+        send_args = {}
+        # The message's timestamp, passed as given, as CMD_SEND_CHANNEL_TXT_MSG
+        # carries it: a 0 goes through, unlike send_text's, which the frame DM
+        # command replaces with a fresh one.
+        timestamp = body.get("timestamp")
+        if timestamp is not None:
+            try:
+                timestamp = int(timestamp)
+            except (TypeError, ValueError):
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            if not 0 <= timestamp <= 0xFFFFFFFF:
+                raise cherrypy.HTTPError(400, "timestamp must be an integer from 0 to 4294967295")
+            send_args["timestamp"] = timestamp
+        # A flood scope for this message only, as the OPENHOP_CHANNEL_TXT_SCOPED
+        # frame extension carries one: the companion's own scope is neither read
+        # nor changed. Checked here so a bad key is a 400, not a failed send.
+        flood_scope_key = body.get("flood_scope_key")
+        if flood_scope_key is not None:
+            try:
+                key = normalize_flood_scope_key(bytes.fromhex(flood_scope_key))
+            except (TypeError, ValueError) as exc:
+                raise cherrypy.HTTPError(400, f"Invalid flood_scope_key: {exc}")
+            send_args["flood_scope_key"] = key
+        success = self._run_async(bridge.send_channel_message(channel_idx, text, **send_args))
         return self._success({"sent": bool(success), **self._packet_hash_field(success)})
 
     # ----- Login -----
