@@ -79,6 +79,23 @@ def manager(device="/dev/ttyUSB-test", **settings):
     )
 
 
+def test_a_port_that_takes_the_whole_window_to_open_is_still_read(monkeypatch):
+    import serial
+
+    port = MagicMock()
+    port.__enter__.return_value = port
+    port.read.return_value = frame({"V": "12800"})
+
+    def open_slowly(**kwargs):
+        time.sleep(0.06)
+        return port
+
+    monkeypatch.setattr(serial, "Serial", MagicMock(side_effect=open_slowly))
+    reading = manager().read_all()[0]
+    assert reading["ok"], reading
+    assert port.read.call_count == 1
+
+
 @pytest.mark.parametrize(
     "label,raw,key,expected",
     [
