@@ -214,7 +214,7 @@ class ConfigManager:
 
     def persist_default_kiss_settings(self, updates: Dict[str, Any]) -> bool:
         """Save settings the modem has already applied into the default radio's section."""
-        return self.persist_kiss_settings(updates)
+        return self.persist_kiss_settings(updates, self._frontend_radio_id(None))
 
     def persist_kiss_settings(
         self, updates: Dict[str, Any], radio_id: Optional[str] = None
@@ -238,12 +238,10 @@ class ConfigManager:
             legacy = repeater_cfg.get("agc_reset_interval")
 
             self.frontend_section(radio_id).update(updates)
-            if "agc_reset_interval_seconds" in updates and radio_id in (
-                None,
-                self._default_radio_id(),
-            ):
-                # Legacy location, read by the default radio only when its own
-                # section has no AGC key.
+            if "agc_reset_interval_seconds" in updates and not self.radio_ids():
+                # Legacy location. Only a single radio drops it: on a multi-radio
+                # node every radio without its own AGC key still inherits it, and
+                # the key just written takes precedence for this radio anyway.
                 repeater_cfg.pop("agc_reset_interval", None)
             if self.save_to_file():
                 return True
@@ -264,6 +262,23 @@ class ConfigManager:
         radio_id = entry.get("id") or entry.get("radio_id")
         return str(radio_id) if radio_id else None
 
+    def _frontend_radio_id(self, radio_id: Optional[str]) -> Optional[str]:
+        """The radios[] id a front-end request acts on; None on a single-radio node.
+
+        Without an id, the default radio is the one the running fabric uses: a
+        default_radio edited in the config takes effect only at restart, and
+        reading one radio while saving into another's entry would apply a value
+        to the wrong radio at the next start.
+        """
+        if radio_id is not None:
+            return radio_id
+        radio = getattr(self.daemon, "radio", None)
+        root = getattr(radio, "_radio", radio)
+        running = getattr(getattr(root, "fabric", None), "default_radio_id", None)
+        if running is not None and str(running) in self.radio_ids():
+            return str(running)
+        return self._default_radio_id()
+
     def kiss_frontend_status(self, radio_id: Optional[str] = None) -> Dict[str, Any]:
         """Front-end controls of one radio, read from the modem.
 
@@ -273,6 +288,7 @@ class ConfigManager:
         """
         from repeater.config import agc_reset_interval_limits, radio_frontend_config
 
+        radio_id = self._frontend_radio_id(radio_id)
         board_config = self._radio_board_config(radio_id)
         radio_type = board_config.get("radio_type")
         radio = self._kiss_frontend_radio(radio_id)
@@ -299,7 +315,7 @@ class ConfigManager:
                 if boosted is not None:
                     running["rx_boosted_gain"] = boosted
         return {
-            "radio_id": radio_id if radio_id is not None else self._default_radio_id(),
+            "radio_id": radio_id,
             "available": radio is not None,
             "radio_type": str(radio_type).lower().strip() if radio_type is not None else None,
             "limits": limits,
@@ -321,6 +337,7 @@ class ConfigManager:
         """
         from repeater.config import agc_reset_interval_error
 
+        radio_id = self._frontend_radio_id(radio_id)
         self._radio_board_config(radio_id)  # KeyError before touching any radio
         radio = self._kiss_frontend_radio(radio_id)
         applied: Dict[str, Any] = {}
@@ -374,13 +391,21 @@ class ConfigManager:
         """Push changed AGC/FEM/boosted-gain settings to every radio.
 
         Each ``radios[]`` entry is checked against its own section; a
-        single-radio node checks its one radio. Returns False when any
-        configured setting could not be applied.
+        single-radio node checks its one radio. Returns False when a configured
+        setting could not be applied to the default radio. Another radio's
+        failure is logged (by ``_apply_live_frontend``) without failing the
+        update: it may inherit a setting its board cannot take, which at build
+        time is a warning too.
         """
-        radio_ids = self.radio_ids() or [None]
+        radio_ids = self.radio_ids()
+        if not radio_ids:
+            return self._apply_live_frontend(None)
+        default_id = self._frontend_radio_id(None)
         ok = True
         for radio_id in radio_ids:
-            ok = self._apply_live_frontend(radio_id) and ok
+            applied = self._apply_live_frontend(radio_id)
+            if radio_id == default_id:
+                ok = applied
         return ok
 
     def _apply_live_frontend(self, radio_id: Optional[str] = None) -> bool:

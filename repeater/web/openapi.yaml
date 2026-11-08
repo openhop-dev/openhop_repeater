@@ -917,6 +917,8 @@ paths:
           schema:
             type: string
       responses:
+        '400':
+          description: radio_id is not a string
         '404':
           description: radio_id names no radios[] entry
         '200':
@@ -942,6 +944,13 @@ paths:
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
+      parameters:
+        - name: radio_id
+          in: query
+          required: false
+          description: Id of a radios[] entry; a radio_id in the body takes precedence
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -957,6 +966,8 @@ paths:
                   radio_id: link
                   fem_rx_gain: true
       responses:
+        '400':
+          description: radio_id is not a string
         '404':
           description: radio_id names no radios[] entry
         '200':
@@ -6452,12 +6463,14 @@ components:
 
     RadioFrontendStatus:
       type: object
-      required: [available, supports, running, configured]
+      required: [radio_id, available, supports, running, configured]
       properties:
         radio_id:
           type: string
           nullable: true
-          description: The radios[] entry these controls belong to; null on a single-radio node
+          description: >
+            The radios[] entry these controls belong to; null on a single-radio node.
+            Without a radio_id in the request, the default radio the running fabric uses.
         radio_type:
           type: string
           nullable: true

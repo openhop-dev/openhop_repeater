@@ -702,3 +702,54 @@ def test_endpoint_radio_id_on_a_single_radio_node_is_404(request_ctx):
     with pytest.raises(cherrypy.HTTPError) as exc:
         api.radio_frontend(radio_id="narrow")
     assert exc.value.status == 404
+
+
+def test_default_radio_is_the_running_fabrics_when_the_config_names_another():
+    """A default_radio edited without a restart must not split the read from the save."""
+    mgr, config, narrow, g2 = _two_radio_manager()
+    config["fabric"]["default_radio"] = "g2"  # running fabric still defaults to narrow
+    narrow.agc, g2.agc = 8, 60
+
+    status = mgr.kiss_frontend_status()
+    assert status["radio_id"] == "narrow"
+    assert status["running"]["agc_reset_interval_seconds"] == 8
+
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+    assert (narrow.agc, g2.agc) == (20, 60)
+    assert config["radios"][0]["kiss"]["agc_reset_interval_seconds"] == 20
+    assert "agc_reset_interval_seconds" not in config["radios"][1]["modem_tcp"]
+
+
+def test_mesh_cli_save_follows_the_running_default_radio():
+    mgr, config, _, _ = _two_radio_manager()
+    config["fabric"]["default_radio"] = "g2"
+    assert mgr.persist_default_kiss_settings({"fem_rx_gain": False})
+    assert config["radios"][0]["kiss"]["fem_rx_gain"] is False
+    assert "fem_rx_gain" not in config["radios"][1]["modem_tcp"]
+
+
+def test_saving_the_default_radios_agc_keeps_the_legacy_key_other_radios_inherit():
+    mgr, config, _, _ = _two_radio_manager()
+
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+
+    assert config["repeater"] == {"agc_reset_interval": 8}
+    assert mgr.kiss_frontend_status("g2")["configured"] == {"agc_reset_interval_seconds": 8}
+    assert mgr.kiss_frontend_status()["configured"]["agc_reset_interval_seconds"] == 20
+
+
+def test_single_radio_agc_save_still_retires_the_legacy_key():
+    radio = FakeKissRadio()
+    mgr, config = _manager(
+        radio, {"kiss": {"port": "/dev/x"}, "repeater": {"agc_reset_interval": 8}}
+    )
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+    assert "agc_reset_interval" not in config["repeater"]
+
+
+def test_live_update_is_not_failed_by_another_radio_that_cannot_take_an_inherited_setting():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    g2.caps = {"rx", "tx"}  # no AGC control, yet it inherits repeater.agc_reset_interval
+
+    assert mgr._apply_live_kiss_hardware_config() is True
+    assert narrow.agc == 8  # the default radio still took the inherited interval
