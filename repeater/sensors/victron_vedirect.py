@@ -393,7 +393,6 @@ class VictronVEDirectSensor(SensorBase):
 
     def _read_serial(self):
         serial = self._serial
-        deadline = time.monotonic() + self.read_timeout_seconds
         parser = VEDirectParser()
         data = {}
         received_frame = False
@@ -409,8 +408,11 @@ class VictronVEDirectSensor(SensorBase):
             dsrdtr=False,
             exclusive=True,
         ) as port:
+            # The read budget starts once the port is open, and the first read is
+            # always made: a slow open must not use up the time meant for reading.
+            deadline = time.monotonic() + self.read_timeout_seconds
             remaining_bytes = 16384
-            while remaining_bytes and time.monotonic() < deadline:
+            while remaining_bytes:
                 port.timeout = min(0.1, max(0, deadline - time.monotonic()))
                 payload = port.read(min(256, remaining_bytes))
                 remaining_bytes -= len(payload)
@@ -419,6 +421,8 @@ class VictronVEDirectSensor(SensorBase):
                     received_frame = True
                     self._seen.update(set(fields) & FIELDS.keys())
                     data.update(normalize(fields))
+                if time.monotonic() >= deadline:
+                    break
         if received_frame:
             return data
         raise RuntimeError("No valid VE.Direct text frame before read limit")
