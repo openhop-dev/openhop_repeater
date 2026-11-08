@@ -81,6 +81,9 @@ class MeshCLI:
         if radio_id not in known:
             ids = ", ".join(known) if known else "none (single-radio node)"
             return f"Error: unknown radio id {radio_id!r}; known ids: {ids}"
+        reason = self.config_manager.frontend_unavailable_reason(radio_id)
+        if reason:
+            return f"Error: {reason}"
         return None
 
     def _persist_frontend_settings(self, updates: dict, radio_id: Optional[str]) -> bool:

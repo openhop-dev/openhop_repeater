@@ -870,6 +870,22 @@ def test_frontend_commands_reject_unknown_ids_without_changes(
     mgr.save_to_file.assert_not_called()
 
 
+@pytest.mark.parametrize("key,value,setting,effective,before,after,reply", _FRONTEND_COMMANDS)
+def test_frontend_commands_name_a_configured_radio_that_is_not_running(
+    key, value, setting, effective, before, after, reply
+):
+    cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
+    # g2 is in radios[] but the running fabric was started without it.
+    del cli.config_manager.daemon.radio._radio.fabric.radios["g2"]
+    config_before = copy.deepcopy(cfg)
+    error = "Error: radio 'g2' is configured but not running (restart to apply radios[] changes)"
+
+    assert cli._cmd_get(f"{key} g2") == error
+    assert cli._cmd_set(f"{key} {value} g2") == error
+    assert cfg == config_before
+    mgr.save_to_file.assert_not_called()
+
+
 def test_frontend_agc_validates_the_selected_radios_range():
     cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
     g2.effective_agc_reset_interval = lambda seconds: seconds if 0 <= seconds <= 60 else None
