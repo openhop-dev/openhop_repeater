@@ -507,6 +507,122 @@ def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
     return key
 
 
+# Widest interval the host will hand a radio. KISS firmware accepts 0-1020 and
+# rounds down to a multiple of 4; an OpenHop modem accepts 0-3600 in 1-second
+# steps. The radio, not this loader, enforces its own range.
+AGC_RESET_INTERVAL_MAX_SEC = 3600
+
+
+def agc_reset_interval_limits(radio) -> Optional[dict]:
+    """Probe the radio's AGC range and step without changing its settings."""
+    try:
+        normalise = getattr(radio, "effective_agc_reset_interval", None)
+        if not callable(normalise):
+            return None
+
+        # Find the ceiling within the host range without depending on the radio type.
+        low, high = 0, AGC_RESET_INTERVAL_MAX_SEC
+        while low < high:
+            mid = (low + high + 1) // 2
+            if normalise(mid) is None:
+                high = mid - 1
+            else:
+                low = mid
+        step = next((s for s in range(1, low + 1) if normalise(s) == s), 1)
+    except Exception:
+        return None
+    return {"min": 0, "max": low, "step": step}
+
+
+def agc_reset_interval_error(radio, seconds: int) -> Optional[str]:
+    """Report the radio's range using its side-effect-free interval check."""
+    normalise = getattr(radio, "effective_agc_reset_interval", None)
+    if not callable(normalise) or normalise(seconds) is not None:
+        return None
+
+    limits = agc_reset_interval_limits(radio)
+    if limits is None:
+        return None
+    maximum = limits["max"]
+    return f"AGC reset interval {seconds} is outside this radio's range (0-{maximum} seconds)"
+
+
+_FRONTEND_SECTIONS = {
+    "kiss": "kiss",
+    "kiss-modem": "kiss",
+    "modem_tcp": "modem_tcp",
+    "modem_usb": "modem_usb",
+}
+
+
+def frontend_section_name(board_config: dict) -> str:
+    """Config section that holds this radio's AGC/FEM keys."""
+    radio_type = str(board_config.get("radio_type") or "").lower().strip()
+    return _FRONTEND_SECTIONS.get(radio_type, "kiss")
+
+
+def radio_frontend_config(board_config: dict) -> Dict[str, Any]:
+    """Optional AGC/FEM/RX-boost settings for one radio's board config.
+
+    KISS radios read ``kiss:``. OpenHop USB/TCP modems read ``modem_usb:`` or
+    ``modem_tcp:``. A ``kiss:`` value is not copied onto a modem. Returns only
+    the keys the operator set, so an absent key leaves the firmware default
+    alone. ``repeater.agc_reset_interval`` is still read when the radio's own
+    section has no AGC key.
+    """
+    section_name = frontend_section_name(board_config)
+    section = board_config.get(section_name)
+    section = section if isinstance(section, dict) else {}
+    options: Dict[str, Any] = {}
+
+    agc = section.get("agc_reset_interval_seconds")
+    if agc is None:
+        repeater_cfg = board_config.get("repeater")
+        if isinstance(repeater_cfg, dict):
+            agc = repeater_cfg.get("agc_reset_interval")
+    if agc is not None and not isinstance(agc, bool):
+        try:
+            agc_int = int(agc)
+        except (TypeError, ValueError):
+            agc_int = None
+        if agc_int is None or agc_int < 0:
+            # Front-end tuning must never stop the radio from being built.
+            logger.warning("Ignoring invalid AGC reset interval %r", agc)
+        else:
+            options["agc_reset_interval_seconds"] = agc_int
+
+    for key in ("fem_rx_gain", "fem_tx_gain", "rx_boosted_gain"):
+        if section.get(key) is not None:
+            options[key] = bool(section[key])
+    return options
+
+
+def kiss_hardware_config(board_config: dict) -> Dict[str, Any]:
+    """Older name for :func:`radio_frontend_config`."""
+    return radio_frontend_config(board_config)
+
+
+def _modem_frontend_kwargs(radio_class, board_config: dict) -> Dict[str, Any]:
+    options = radio_frontend_config(board_config)
+    if not options:
+        return {}
+    try:
+        params = inspect.signature(radio_class).parameters
+        param = params.get("radio_config")
+        if (param is not None and param.kind is not inspect.Parameter.POSITIONAL_ONLY) or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return {"radio_config": options}
+    except (TypeError, ValueError):
+        pass
+    logger.warning(
+        "Ignoring RF front-end settings for %s: these settings need a newer openhop_core; "
+        "building radio without them",
+        board_config.get("radio_type"),
+    )
+    return {}
+
+
 # MeshCore's private LoRa sync word, as the USB/TCP modem firmware expects it.
 MESHCORE_SYNC_WORD = 0x12
 
@@ -739,6 +855,9 @@ def get_radio_for_board(board_config: dict):
                 radio_config[_key] = int(kiss_config[_key])
         if kiss_config.get("kiss_full_duplex") is not None:
             radio_config["kiss_full_duplex"] = bool(kiss_config["kiss_full_duplex"])
+        # AGC reset interval / FEM gain: the wrapper probes modem capabilities, applies
+        # what the board supports after radio setup, and re-applies on reconnect.
+        radio_config.update(radio_frontend_config(board_config))
 
         radio = KissModemWrapper(
             port=port,
@@ -796,6 +915,7 @@ def get_radio_for_board(board_config: dict):
             preamble_length=int(radio_cfg.get("preamble_length", 16)),
             lbt_enabled=bool(tcp_cfg.get("lbt_enabled", True)),
             lbt_max_attempts=int(tcp_cfg.get("lbt_max_attempts", 5)),
+            **_modem_frontend_kwargs(TCPLoRaRadio, board_config),
         )
 
         try:
@@ -844,6 +964,7 @@ def get_radio_for_board(board_config: dict):
             preamble_length=int(radio_cfg.get("preamble_length", 16)),
             lbt_enabled=bool(usb_cfg.get("lbt_enabled", True)),
             lbt_max_attempts=int(usb_cfg.get("lbt_max_attempts", 5)),
+            **_modem_frontend_kwargs(USBLoRaRadio, board_config),
         )
 
         try:

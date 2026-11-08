@@ -31,6 +31,34 @@ def _attach_storage(api, storage):
     api.daemon_instance = SimpleNamespace(repeater_handler=SimpleNamespace(storage=storage))
 
 
+@pytest.mark.parametrize("stop_fails", [False, True])
+@pytest.mark.parametrize("name", ["deleted", ""])
+def test_delete_companion_tears_down_runtime_after_save(cherrypy_ctx, stop_fails, name):
+    request, _ = cherrypy_ctx
+    request.method = "DELETE"
+    api = _make_api({"identities": {"companions": [{"name": name, "identity_key": "11" * 32}]}})
+    remove = AsyncMock(
+        side_effect=RuntimeError("stop failed") if stop_fails else None, return_value=True
+    )
+    api.daemon_instance = SimpleNamespace(remove_companion=remove)
+    api.event_loop = object()
+
+    def submit(coro, loop):
+        api.config_manager.save_to_file.assert_called_once()
+        assert api.config["identities"]["companions"] == []
+        assert loop is api.event_loop
+        return SimpleNamespace(result=lambda timeout: asyncio.run(coro))
+
+    with patch("asyncio.run_coroutine_threadsafe", side_effect=submit):
+        result = api.delete_identity(name=name, lookup_identity_key="11" * 32, type="companion")
+
+    from repeater.companion.identity_resolve import derive_companion_public_key_hex
+
+    remove.assert_awaited_once_with(derive_companion_public_key_hex("11" * 32))
+    assert result["success"] is True
+    assert ("Restart required" in result["message"]) is stop_fails
+
+
 class _FakeDiscoveryHelper:
     def __init__(self):
         self.cleanup_called = False
@@ -1914,11 +1942,13 @@ def test_check_pymc_console_and_mqtt_status_and_broker_presets(cherrypy_ctx):
         is_connected=lambda: True,
         has_pending_reconnect=lambda: False,
         format="json",
+        sent={"messages": 2, "payload_bytes": 1200},
     )
     _attach_storage(api, SimpleNamespace(mqtt_handler=SimpleNamespace(connections=[conn])))
     status2 = api.mqtt_status()
     assert status2["success"] is True
     assert status2["data"]["brokers"][0]["name"] == "main"
+    assert status2["data"]["brokers"][0]["sent"] == {"messages": 2, "payload_bytes": 1200}
 
     with (
         patch("repeater.presets.list_presets", return_value=["waev"]),
@@ -2876,7 +2906,7 @@ def test_identity_endpoints_paths(cherrypy_ctx):
     api.daemon_instance = SimpleNamespace(identity_manager=id_mgr)
     d2 = api.delete_identity(name="comp1", type="companion")
     assert d2["success"] is True
-    assert "comp1" not in id_mgr.named_identities
+    assert "Restart required" in d2["message"]
     assert response.status in (200, 405)
 
 

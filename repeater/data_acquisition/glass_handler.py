@@ -1133,7 +1133,22 @@ class GlassHandler:
 
         try:
             message = json.dumps(envelope, separators=(",", ":"), sort_keys=True, default=str)
-            self._mqtt_client.publish(topic, message, qos=0, retain=False)
+            result = self._mqtt_client.publish(topic, message, qos=0, retain=False)
+            if getattr(result, "rc", None) == 0:
+                from .network_usage import broker_identity
+
+                handler = getattr(self.daemon_instance, "repeater_handler", None)
+                storage = getattr(handler, "storage", None)
+                usage = getattr(storage, "network_usage", None)
+                if usage is not None:
+                    source = broker_identity(
+                        {
+                            "host": self.mqtt_broker_host,
+                            "port": self.mqtt_broker_port,
+                            "name": "Glass telemetry",
+                        }
+                    )
+                    usage.record_mqtt(source, "Glass telemetry", message)
         except Exception as exc:
             logger.debug("Failed publishing Glass telemetry MQTT message: %s", exc)
 

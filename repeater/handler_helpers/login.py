@@ -215,11 +215,31 @@ class LoginHelper:
                     )
             return success, permissions
 
+        # The client's route as this identity knows it, from its PATH packets.
+        # A direct login is answered along it, and a flood login forgets it, as
+        # firmware handleLoginReq sets OUT_PATH_UNKNOWN: a client that logs in
+        # by flood may have moved, and replies sent on its old route (DM ACKs,
+        # room pushes, CLI replies) would never reach it. Its next PATH teaches
+        # the new one.
+        def get_out_path(client_identity):
+            client = identity_acl.get_client(client_identity.get_public_key())
+            if client is None or client.out_path_len < 0:
+                return None
+            return bytes(client.out_path), client.out_path_len
+
+        def clear_out_path(client_identity):
+            client = identity_acl.get_client(client_identity.get_public_key())
+            if client is not None:
+                client.out_path_len = -1
+                client.out_path = bytearray()
+
         handler = LoginServerHandler(
             local_identity=identity,
             log_fn=self.log_fn,
             authenticate_callback=auth_callback_with_context,
             is_room_server=(identity_type == "room_server"),
+            get_out_path=get_out_path,
+            clear_out_path=clear_out_path,
         )
 
         # Wrap the login handler in an anon-request dispatcher so anonymous

@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from repeater.config import build_radio_profiles, resolve_storage_dir
 
 from .mqtt_handler import MeshCoreToMqttPusher
+from .network_usage import NetworkUsageCollector
 from .rrdtool_handler import RRDToolHandler
 from .sqlite_handler import SQLiteHandler
 from .storage_utils import PacketRecord
@@ -72,6 +73,8 @@ class StorageCollector:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         self.sqlite_handler = SQLiteHandler(self.storage_dir)
+        self.network_usage = NetworkUsageCollector(self.sqlite_handler)
+        self.network_usage.start()
         self.rrd_handler = None
         if self.rrd_enabled:
             candidate_rrd_handler = RRDToolHandler(self.storage_dir)
@@ -99,6 +102,7 @@ class StorageCollector:
                     config=config,
                     stats_provider=self._get_live_stats,
                     radio_stats_provider=self._get_radio_stats,
+                    usage_recorder=self.network_usage.record_mqtt,
                 )
                 self.mqtt_handler.connect()
 
@@ -880,6 +884,10 @@ class StorageCollector:
                 logger.info("MQTT handler disconnected")
             except Exception as e:
                 logger.error(f"Error disconnecting MQTT handler: {e}")
+
+        usage = getattr(self, "network_usage", None)
+        if usage is not None:
+            usage.stop()
 
     def set_glass_publisher(self, publish_callback):
         self.glass_publish_callback = publish_callback

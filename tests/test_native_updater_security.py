@@ -1,5 +1,7 @@
 """No updater execution: inspect templates and run only benign Python lookup probes."""
 
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -103,6 +105,19 @@ def test_built_wheel_contains_service_without_checkout(tmp_path):
             archive.read("repeater/plugins/openhop-plugin-manager.service")
             == (ROOT / "openhop-plugin-manager.service").read_bytes()
         )
+        # A UI-source merge is insufficient: native upgrades consume this wheel.
+        prefix = "repeater/web/html/"
+        manifest_bytes = (ROOT / prefix / "frontend-build.json").read_bytes()
+        assert archive.read(prefix + "frontend-build.json") == manifest_bytes
+        expected = json.loads(manifest_bytes)["files"]
+        packaged = {
+            name.removeprefix(prefix)
+            for name in archive.namelist()
+            if name.startswith(prefix) and not name.endswith("/")
+        }
+        assert packaged == set(expected) | {"frontend-build.json"}
+        for name, digest in expected.items():
+            assert hashlib.sha256(archive.read(prefix + name)).hexdigest() == digest, name
 
 
 def test_package_delivers_identical_service_template():

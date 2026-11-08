@@ -2146,6 +2146,65 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in(force=False)
+    def radio_frontend(self):
+        """RF front-end controls of the default radio (KISS or OpenHop modem).
+
+        AGC reset interval, external FEM gain, and the radio chip's boosted RX gain.
+
+        GET  /api/radio_frontend -> capabilities, running and configured values
+        POST /api/radio_frontend {"agc_reset_interval_seconds": 0-3600,
+                                  "fem_rx_gain": bool, "fem_tx_gain": bool,
+                                  "rx_boosted_gain": bool}
+
+        POST applies to the modem first and persists only what it confirms; no
+        restart is needed.
+        """
+        self._set_cors_headers()
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            if cherrypy.request.method == "GET":
+                return self._success(self.config_manager.kiss_frontend_status())
+            self._require_post()
+
+            data = cherrypy.request.json or {}
+            if not isinstance(data, dict):
+                return self._error("Request body must be a JSON object")
+            updates = {}
+            if "agc_reset_interval_seconds" in data:
+                agc = data["agc_reset_interval_seconds"]
+                if isinstance(agc, bool) or not isinstance(agc, int) or not 0 <= agc <= 3600:
+                    return self._error("agc_reset_interval_seconds must be an integer 0-3600")
+                updates["agc_reset_interval_seconds"] = agc
+            for key in ("fem_rx_gain", "fem_tx_gain", "rx_boosted_gain"):
+                if key in data:
+                    if not isinstance(data[key], bool):
+                        return self._error(f"{key} must be true or false")
+                    updates[key] = data[key]
+            if not updates:
+                return self._error("No valid settings provided")
+
+            result = self.config_manager.apply_kiss_frontend(updates)
+            status = self.config_manager.kiss_frontend_status()
+            if result["errors"]:
+                detail = ", ".join(f"{k}: {v}" for k, v in result["errors"].items())
+                return {
+                    "success": False,
+                    "error": f"Some settings were not applied ({detail})",
+                    "data": {**status, **result},
+                }
+            return self._success({**status, **result}, restart_required=False)
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Radio front-end error: {e}", exc_info=True)
+            return self._error(str(e))
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
     @cherrypy.tools.json_in()
     def update_duty_cycle_config(self):
         self._set_cors_headers()
@@ -2755,6 +2814,7 @@ class APIEndpoints:
                             },
                             "format": conn.format,
                             "neighbors": getattr(conn, "neighbors_enabled", False),
+                            "sent": dict(conn.sent),
                         }
                     )
 
@@ -3919,6 +3979,30 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error getting process stats: {e}")
             return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def network_usage(self, days=None, hours=None):
+        """Persisted complete-minute usage; available only below authenticated /api."""
+        if cherrypy.request.method != "GET":
+            cherrypy.response.headers["Allow"] = "GET"
+            cherrypy.response.status = 405
+            return self._error("Method not allowed. This endpoint requires GET.")
+        if days is not None and hours is not None:
+            cherrypy.response.status = 400
+            return self._error("Specify either hours or days, not both")
+        if days is not None and str(days) not in {str(value) for value in range(1, 8)}:
+            cherrypy.response.status = 400
+            return self._error("days must be an integer between 1 and 7")
+        if hours is not None and str(hours) not in {str(value) for value in range(1, 169)}:
+            cherrypy.response.status = 400
+            return self._error("hours must be an integer between 1 and 168")
+        selected_hours = int(hours) if hours is not None else int(days or 1) * 24
+        try:
+            return self._get_storage().network_usage.snapshot(hours=selected_hours)
+        except Exception:  # noqa: BLE001 - never expose storage exception details
+            cherrypy.response.status = 503
+            return self._error("Network usage history unavailable")
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
@@ -7328,19 +7412,30 @@ class APIEndpoints:
                 if err:
                     return self._error(err)
                 resolved_name = str(companions[idx].get("name") or "").strip()
-                companions.pop(idx)
+                removed = companions.pop(idx)
                 self.config["identities"]["companions"] = companions
                 saved = self.config_manager.save_to_file()
                 if not saved:
                     return self._error("Failed to save configuration to file")
                 logger.info(f"Deleted companion: {resolved_name}")
                 unregister_success = False
-                if self.daemon_instance and hasattr(self.daemon_instance, "identity_manager"):
-                    identity_manager = self.daemon_instance.identity_manager
-                    if resolved_name and resolved_name in identity_manager.named_identities:
-                        del identity_manager.named_identities[resolved_name]
-                        logger.info(f"Removed companion {resolved_name} from named_identities")
-                        unregister_success = True
+                if self.daemon_instance and self.event_loop:
+                    try:
+                        import asyncio
+
+                        public_key = derive_companion_public_key_hex(removed.get("identity_key"))
+                        if not public_key:
+                            raise ValueError("Cannot resolve deleted companion public key")
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.daemon_instance.remove_companion(public_key), self.event_loop
+                        )
+                        unregister_success = future.result(timeout=15)
+                    except Exception as comp_error:
+                        logger.warning(
+                            f"Hot reload companion '{resolved_name}' removal failed: {comp_error}. "
+                            "Restart required to fully remove.",
+                            exc_info=True,
+                        )
                 message = (
                     f"Companion '{resolved_name}' deleted successfully and deactivated immediately!"
                     if unregister_success
