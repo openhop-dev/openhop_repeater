@@ -905,7 +905,8 @@ paths:
         radio, read from the modem: the radios[] entry named by radio_id, or the
         default radio without it. KISS firmware v2 and OpenHop modem firmware that
         implements the RF frame commands report support; the controls a board
-        supports come from the board itself.
+        supports come from the board itself. An explicitly selected radio that is
+        configured but not running reports available: false with unavailable_reason.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -940,7 +941,9 @@ paths:
         Applies the given settings to one radio's modem (the radios[] entry named by
         radio_id, or the default radio without it) and persists only the values it
         confirms, into that radio's own config section. Takes effect immediately; no
-        restart is needed. Omitted fields are left unchanged.
+        restart is needed. Omitted fields are left unchanged. An explicitly selected
+        radio that is configured but not running returns 409 without applying or
+        persisting settings; restart to apply radios[] changes.
       security:
         - BearerAuth: []
         - ApiKeyAuth: []
@@ -970,6 +973,11 @@ paths:
           description: radio_id is not a string
         '404':
           description: radio_id names no radios[] entry
+        '409':
+          description: >
+            radio_id names a configured radio that is not running. The error names
+            the radio and advises restarting to apply radios[] changes. Nothing is
+            applied or persisted.
         '200':
           description: >
             Settings applied. On partial failure success is false, error names each
@@ -6493,6 +6501,12 @@ components:
         available:
           type: boolean
           description: The radio is a KISS or OpenHop modem with front-end controls
+        unavailable_reason:
+          type: string
+          description: >
+            Optional explanation when available is false and the cause is known.
+            For an explicitly selected radio_id that is configured but absent from
+            the running fabric, advises restarting to apply radios[] changes.
         supports:
           type: object
           required: [agc_reset_interval_seconds, fem_rx_gain, fem_tx_gain, rx_boosted_gain]

@@ -100,11 +100,7 @@ class ConfigManager:
         return root if radio_id is None else None
 
     def default_physical_radio(self):
-        """The default radio's hardware object, unwrapped from Fabric/adapters.
-
-        Mesh CLI hardware commands act on this radio only: a multi-radio node can
-        mix boards with different front ends, so one global setting is ill-defined.
-        """
+        """The default radio's hardware object, unwrapped from Fabric/adapters."""
         return self.physical_radio()
 
     def radio_ids(self) -> list:
@@ -279,6 +275,16 @@ class ConfigManager:
             return str(running)
         return self._default_radio_id()
 
+    def frontend_unavailable_reason(self, radio_id: Optional[str]) -> Optional[str]:
+        """Explain a configured but absent radio for an explicitly selected id."""
+        if radio_id is not None and radio_id in self.radio_ids():
+            if self.physical_radio(radio_id) is None:
+                return (
+                    f"radio {radio_id!r} is configured but not running "
+                    "(restart to apply radios[] changes)"
+                )
+        return None
+
     def kiss_frontend_status(self, radio_id: Optional[str] = None) -> Dict[str, Any]:
         """Front-end controls of one radio, read from the modem.
 
@@ -288,6 +294,7 @@ class ConfigManager:
         """
         from repeater.config import agc_reset_interval_limits, radio_frontend_config
 
+        unavailable_reason = self.frontend_unavailable_reason(radio_id)
         radio_id = self._frontend_radio_id(radio_id)
         board_config = self._radio_board_config(radio_id)
         radio_type = board_config.get("radio_type")
@@ -314,7 +321,7 @@ class ConfigManager:
                 boosted = radio.get_rx_boosted_gain()
                 if boosted is not None:
                     running["rx_boosted_gain"] = boosted
-        return {
+        status = {
             "radio_id": radio_id,
             "available": radio is not None,
             "radio_type": str(radio_type).lower().strip() if radio_type is not None else None,
@@ -323,6 +330,9 @@ class ConfigManager:
             "running": running,
             "configured": radio_frontend_config(board_config),
         }
+        if radio is None and unavailable_reason:
+            status["unavailable_reason"] = unavailable_reason
+        return status
 
     def apply_kiss_frontend(
         self, updates: Dict[str, Any], radio_id: Optional[str] = None

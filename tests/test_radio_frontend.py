@@ -665,6 +665,105 @@ def _two_radio_api():
     return api, config, narrow, g2
 
 
+@pytest.fixture(params=["missing", "empty_fabric", "deferred", "stopped"])
+def unavailable_radio_api(request):
+    api, config, narrow, g2 = _two_radio_api()
+    mgr = api.config_manager
+    if request.param == "missing":
+        mgr.daemon = _fabric_daemon({"narrow": narrow}, "narrow")
+    elif request.param == "empty_fabric":
+        mgr.daemon = _fabric_daemon({}, "narrow")
+    elif request.param == "deferred":
+        mgr.daemon = SimpleNamespace(radio=None)
+    else:
+        mgr.daemon = None
+    return api, config, narrow, g2
+
+
+_G2_UNAVAILABLE = "radio 'g2' is configured but not running (restart to apply radios[] changes)"
+
+
+def test_endpoint_get_explains_a_configured_radio_that_is_not_running(
+    request_ctx, unavailable_radio_api
+):
+    api, config, narrow, g2 = unavailable_radio_api
+    before = copy.deepcopy(config)
+    result = api.radio_frontend(radio_id="g2")
+
+    assert result["success"] is True
+    status = result["data"]
+    assert status["radio_id"] == "g2"
+    assert status["available"] is False
+    assert status["unavailable_reason"] == _G2_UNAVAILABLE
+    assert status["configured"] == {"agc_reset_interval_seconds": 8}
+    assert status["running"] == {}
+    assert not any(status["supports"].values())
+    assert config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
+@pytest.mark.parametrize("id_in_body", [True, False])
+def test_endpoint_post_to_a_configured_radio_that_is_not_running_is_409(
+    request_ctx, unavailable_radio_api, id_in_body
+):
+    api, config, narrow, g2 = unavailable_radio_api
+    before = copy.deepcopy(config)
+    radios_before = copy.deepcopy((vars(narrow), vars(g2)))
+    api.config_manager.apply_kiss_frontend = MagicMock()
+    request_ctx.method = "POST"
+    request_ctx.json = {"agc_reset_interval_seconds": 20, "fem_tx_gain": True}
+    if id_in_body:
+        request_ctx.json["radio_id"] = "g2"
+
+    with pytest.raises(cherrypy.HTTPError) as exc:
+        api.radio_frontend(radio_id=None if id_in_body else "g2")
+
+    assert exc.value.status == 409
+    assert exc.value._message == _G2_UNAVAILABLE
+    assert config == before
+    assert (vars(narrow), vars(g2)) == radios_before
+    api.config_manager.apply_kiss_frontend.assert_not_called()
+    api.config_manager.save_to_file.assert_not_called()
+
+
+def test_running_radio_without_frontend_controls_keeps_unsupported_behaviour(request_ctx):
+    api, config, narrow, g2 = _two_radio_api()
+    api.config_manager.daemon = _fabric_daemon({"narrow": narrow, "g2": object()}, "narrow")
+    before = copy.deepcopy(config)
+
+    status = api.radio_frontend(radio_id="g2")["data"]
+    assert status["available"] is False
+    assert "unavailable_reason" not in status
+
+    request_ctx.method = "POST"
+    request_ctx.json = {"radio_id": "g2", "fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert result["success"] is False
+    assert result["data"]["errors"] == {"fem_tx_gain": "unsupported"}
+    assert config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
+@pytest.mark.parametrize("multi_radio", [False, True])
+def test_missing_default_radio_without_an_id_keeps_unsupported_behaviour(request_ctx, multi_radio):
+    api = _two_radio_api()[0] if multi_radio else _api(None)
+    api.config_manager.daemon = None
+    before = copy.deepcopy(api.config)
+
+    status = api.radio_frontend()["data"]
+    assert status["available"] is False
+    assert "unavailable_reason" not in status
+
+    request_ctx.method = "POST"
+    request_ctx.json = {"fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert result["success"] is False
+    assert result["data"]["errors"] == {"fem_tx_gain": "unsupported"}
+    assert "unavailable_reason" not in result["data"]
+    assert api.config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
 def test_endpoint_get_takes_a_radio_id(request_ctx):
     api, _, _, g2 = _two_radio_api()
     g2.agc = 60

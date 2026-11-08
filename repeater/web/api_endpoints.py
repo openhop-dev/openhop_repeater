@@ -2188,6 +2188,9 @@ class APIEndpoints:
             if not isinstance(data, dict):
                 return self._error("Request body must be a JSON object")
             radio_id = self._frontend_radio_id(data.get("radio_id", radio_id))
+            unavailable_reason = self.config_manager.frontend_unavailable_reason(radio_id)
+            if unavailable_reason:
+                raise cherrypy.HTTPError(409, unavailable_reason)
             updates = {}
             if "agc_reset_interval_seconds" in data:
                 agc = data["agc_reset_interval_seconds"]
