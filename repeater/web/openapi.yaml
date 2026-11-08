@@ -920,8 +920,16 @@ paths:
       responses:
         '400':
           description: radio_id is not a string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: radio_id names no radios[] entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '200':
           description: Front-end status
           content:
@@ -971,13 +979,25 @@ paths:
       responses:
         '400':
           description: radio_id is not a string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: radio_id names no radios[] entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: >
             radio_id names a configured radio that is not running. The error names
             the radio and advises restarting to apply radios[] changes. Nothing is
             applied or persisted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '200':
           description: >
             Settings applied. On partial failure success is false, error names each

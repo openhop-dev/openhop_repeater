@@ -715,11 +715,10 @@ def test_endpoint_post_to_a_configured_radio_that_is_not_running_is_409(
     if id_in_body:
         request_ctx.json["radio_id"] = "g2"
 
-    with pytest.raises(cherrypy.HTTPError) as exc:
-        api.radio_frontend(radio_id=None if id_in_body else "g2")
+    result = api.radio_frontend(radio_id=None if id_in_body else "g2")
 
-    assert exc.value.status == 409
-    assert exc.value._message == _G2_UNAVAILABLE
+    assert cherrypy.response.status == 409
+    assert result == {"success": False, "error": _G2_UNAVAILABLE}
     assert config == before
     assert (vars(narrow), vars(g2)) == radios_before
     api.config_manager.apply_kiss_frontend.assert_not_called()
@@ -791,16 +790,25 @@ def test_endpoint_unknown_radio_id_is_404(request_ctx, method):
     api, _, _, _ = _two_radio_api()
     request_ctx.method = method
     request_ctx.json = {"radio_id": "nope", "fem_tx_gain": True}
-    with pytest.raises(cherrypy.HTTPError) as exc:
-        api.radio_frontend(radio_id="nope" if method == "GET" else None)
-    assert exc.value.status == 404
+    result = api.radio_frontend(radio_id="nope" if method == "GET" else None)
+    assert cherrypy.response.status == 404
+    assert result == {"success": False, "error": "Unknown radio_id 'nope'"}
+
+
+def test_endpoint_non_string_radio_id_is_400(request_ctx):
+    api, _, _, _ = _two_radio_api()
+    request_ctx.method = "POST"
+    request_ctx.json = {"radio_id": 2, "fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert cherrypy.response.status == 400
+    assert result == {"success": False, "error": "radio_id must be a string"}
 
 
 def test_endpoint_radio_id_on_a_single_radio_node_is_404(request_ctx):
     api = _api(FakeKissRadio())
-    with pytest.raises(cherrypy.HTTPError) as exc:
-        api.radio_frontend(radio_id="narrow")
-    assert exc.value.status == 404
+    result = api.radio_frontend(radio_id="narrow")
+    assert cherrypy.response.status == 404
+    assert result["success"] is False
 
 
 def test_default_radio_is_the_running_fabrics_when_the_config_names_another():

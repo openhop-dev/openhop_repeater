@@ -2216,7 +2216,12 @@ class APIEndpoints:
                 }
             return self._success({**status, **result}, restart_required=False)
 
-        except cherrypy.HTTPError:
+        except cherrypy.HTTPError as e:
+            # A bad, unknown, or not-running radio_id: answer in JSON like the
+            # other errors here, with the status kept, so clients can show why.
+            if e.status in (400, 404, 409):
+                cherrypy.response.status = e.status
+                return self._error(e._message)
             raise
         except Exception as e:
             logger.error(f"Radio front-end error: {e}", exc_info=True)
