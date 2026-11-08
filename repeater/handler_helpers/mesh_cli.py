@@ -72,14 +72,36 @@ class MeshCLI:
         "radio.fem.txgain": ("tx_gain", "supports_fem_tx_gain"),
     }
 
-    def _kiss_radio(self, capability: str):
-        """The default radio when it reports ``capability``, else None.
+    _FRONTEND_KEYS = ("agc.reset.interval", *_FEM_KEYS, "radio.rxgain")
+
+    def _frontend_radio_error(self, radio_id: Optional[str]) -> Optional[str]:
+        if radio_id is None:
+            return None
+        known = self.config_manager.radio_ids()
+        if radio_id not in known:
+            ids = ", ".join(known) if known else "none (single-radio node)"
+            return f"Error: unknown radio id {radio_id!r}; known ids: {ids}"
+        reason = self.config_manager.frontend_unavailable_reason(radio_id)
+        if reason:
+            return f"Error: {reason}"
+        return None
+
+    def _persist_frontend_settings(self, updates: dict, radio_id: Optional[str]) -> bool:
+        if radio_id is None:
+            return self.config_manager.persist_default_kiss_settings(updates)
+        return self.config_manager.persist_kiss_settings(updates, radio_id)
+
+    def _kiss_radio(self, capability: str, radio_id: Optional[str] = None):
+        """The selected radio when it reports ``capability``, else None.
 
         AGC/FEM commands are applied to the modem first and persisted only once it
         confirms, so "OK" never describes a setting the radio is not running.
         """
-        getter = getattr(self.config_manager, "default_physical_radio", None)
-        radio = getter() if callable(getter) else None
+        if radio_id is None:
+            getter = getattr(self.config_manager, "default_physical_radio", None)
+            radio = getter() if callable(getter) else None
+        else:
+            radio = self.config_manager.physical_radio(radio_id)
         check = getattr(radio, capability, None)
         if not callable(check):
             return None
@@ -333,10 +355,11 @@ class MeshCLI:
             "  get direct.txdelay  Direct TX delay factor",
             "  get multi.acks      Multi-ack count",
             "  get int.thresh      Interference threshold",
-            "  get agc.reset.interval  AGC reset interval (default radio)",
-            "  get radio.fem.rxgain  External FEM RX gain (default radio)",
-            "  get radio.fem.txgain  External FEM TX gain (default radio)",
-            "  get radio.rxgain    Radio chip boosted RX gain (default radio)",
+            "  get agc.reset.interval [radio_id]  AGC reset interval",
+            "  get radio.fem.rxgain [radio_id]  External FEM RX gain",
+            "  get radio.fem.txgain [radio_id]  External FEM TX gain",
+            "  get radio.rxgain [radio_id]  Radio chip boosted RX gain",
+            "    Omit radio_id for the default radio; ids name radios[] entries",
             "",
             "Set:  (use 'help set' for details)",
             "  set <param> <value>",
@@ -383,11 +406,12 @@ class MeshCLI:
                 "  set direct.txdelay <val>  Direct TX delay (0-2)\n"
                 "  set multi.acks <n>     Multi-ack count\n"
                 "  set int.thresh <dbm>   Interference threshold\n"
-                "  set agc.reset.interval <n>  AGC reset secs (0=off; default radio)\n"
+                "  set agc.reset.interval <n> [radio_id]  AGC reset secs (0=off)\n"
                 "    KISS: 0-1020, rounded down to 4 s; OpenHop modem: 0-3600, 1 s steps\n"
-                "  set radio.fem.rxgain on|off  External FEM RX gain (default radio)\n"
-                "  set radio.fem.txgain on|off  External FEM TX gain (default radio)\n"
-                "  set radio.rxgain on|off  Radio chip boosted RX gain (default radio)"
+                "  set radio.fem.rxgain on|off [radio_id]  External FEM RX gain\n"
+                "  set radio.fem.txgain on|off [radio_id]  External FEM TX gain\n"
+                "  set radio.rxgain on|off [radio_id]  Radio chip boosted RX gain\n"
+                "    Omit radio_id for the default radio; ids name radios[] entries"
             ),
             "get": "Get commands \u2014 type 'help' to see all 'get' parameters.",
             "reboot": "Restart the repeater service via systemd.",
@@ -545,6 +569,17 @@ class MeshCLI:
         param = param.strip()
         logger.debug(f"_cmd_get called with param: '{param}' (len={len(param)})")
 
+        radio_id = None
+        parts = param.split()
+        if parts and parts[0] in self._FRONTEND_KEYS:
+            if len(parts) > 2:
+                return "Error: Expected <param> [radio_id]"
+            param = parts[0]
+            radio_id = parts[1] if len(parts) == 2 else None
+            error = self._frontend_radio_error(radio_id)
+            if error:
+                return error
+
         if param == "af":
             af = self.repeater_config.get("airtime_factor", 1.0)
             return f"> {af}"
@@ -659,7 +694,7 @@ class MeshCLI:
             return f"> {thresh}"
 
         elif param == "agc.reset.interval":
-            radio = self._kiss_radio("supports_agc_reset_control")
+            radio = self._kiss_radio("supports_agc_reset_control", radio_id)
             if radio is None:
                 return "Error: unsupported"
             interval = radio.get_agc_reset_interval()
@@ -669,7 +704,7 @@ class MeshCLI:
 
         elif param in self._FEM_KEYS:
             state_key, supports = self._FEM_KEYS[param]
-            radio = self._kiss_radio(supports)
+            radio = self._kiss_radio(supports, radio_id)
             if radio is None:
                 return "Error: unsupported"
             state = radio.get_fem_state()
@@ -680,7 +715,7 @@ class MeshCLI:
             return f"> {'on' if state[state_key] else 'off'}"
 
         elif param == "radio.rxgain":
-            radio = self._kiss_radio("supports_rx_boosted_gain")
+            radio = self._kiss_radio("supports_rx_boosted_gain", radio_id)
             if radio is None:
                 return "Error: unsupported"
             boosted = radio.get_rx_boosted_gain()
@@ -700,6 +735,17 @@ class MeshCLI:
             return "Error: Missing value"
 
         key, value = parts[0], parts[1]
+
+        radio_id = None
+        if key in self._FRONTEND_KEYS:
+            values = value.split()
+            if len(values) > 2:
+                return "Error: Expected <value> [radio_id]"
+            if len(values) == 2:
+                value, radio_id = values
+            error = self._frontend_radio_error(radio_id)
+            if error:
+                return error
 
         try:
             if key == "af":
@@ -884,7 +930,7 @@ class MeshCLI:
                 interval = int(value)
                 if interval < 0 or interval > AGC_RESET_INTERVAL_MAX_SEC:
                     return f"Error: must be 0-{AGC_RESET_INTERVAL_MAX_SEC}"
-                radio = self._kiss_radio("supports_agc_reset_control")
+                radio = self._kiss_radio("supports_agc_reset_control", radio_id)
                 if radio is None:
                     return "Error: unsupported"
                 error = agc_reset_interval_error(radio, interval)
@@ -896,8 +942,8 @@ class MeshCLI:
                     return "Error: radio did not apply setting"
                 if effective is None:
                     return "Error: radio did not apply setting"
-                if not self.config_manager.persist_default_kiss_settings(
-                    {"agc_reset_interval_seconds": effective}
+                if not self._persist_frontend_settings(
+                    {"agc_reset_interval_seconds": effective}, radio_id
                 ):
                     return "Error: applied to radio but failed to save config"
                 if effective != interval:
@@ -908,16 +954,14 @@ class MeshCLI:
                 if value not in ("on", "off"):
                     return "Error: must be on or off"
                 state_key, supports = self._FEM_KEYS[key]
-                radio = self._kiss_radio(supports)
+                radio = self._kiss_radio(supports, radio_id)
                 if radio is None:
                     return "Error: unsupported"
                 enabled = value == "on"
                 setter = radio.set_fem_rx_gain if state_key == "rx_gain" else radio.set_fem_tx_gain
                 if not setter(enabled):
                     return "Error: radio did not apply setting"
-                if not self.config_manager.persist_default_kiss_settings(
-                    {f"fem_{state_key}": enabled}
-                ):
+                if not self._persist_frontend_settings({f"fem_{state_key}": enabled}, radio_id):
                     return "Error: applied to radio but failed to save config"
                 return "OK"
 
@@ -925,15 +969,13 @@ class MeshCLI:
                 # The radio chip's boosted RX gain; radio.fem.rxgain is the external LNA.
                 if value not in ("on", "off"):
                     return "Error: must be on or off"
-                radio = self._kiss_radio("supports_rx_boosted_gain")
+                radio = self._kiss_radio("supports_rx_boosted_gain", radio_id)
                 if radio is None:
                     return "Error: unsupported"
                 enabled = value == "on"
                 if radio.set_rx_boosted_gain(enabled) != enabled:
                     return "Error: radio did not apply setting"
-                if not self.config_manager.persist_default_kiss_settings(
-                    {"rx_boosted_gain": enabled}
-                ):
+                if not self._persist_frontend_settings({"rx_boosted_gain": enabled}, radio_id):
                     return "Error: applied to radio but failed to save config"
                 return "OK"
 

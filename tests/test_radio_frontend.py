@@ -1,5 +1,6 @@
 """KISS RF front-end controls: ConfigManager status/apply/persist and /api/radio_frontend."""
 
+import copy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -87,6 +88,7 @@ def test_status_reads_modem_and_config():
     mgr, _ = _manager(radio, {"kiss": {"port": "/dev/x", "fem_rx_gain": True}})
 
     assert mgr.kiss_frontend_status() == {
+        "radio_id": None,
         "available": True,
         "radio_type": None,
         "limits": {},
@@ -302,6 +304,7 @@ def test_endpoint_get(request_ctx, agc_radio):
     assert result == {
         "success": True,
         "data": {
+            "radio_id": None,
             "available": True,
             "radio_type": radio_type,
             "limits": {"agc_reset_interval_seconds": limits},
@@ -516,3 +519,344 @@ def test_status_with_core_that_predates_boosted_gain():
     assert mgr.apply_kiss_frontend({"rx_boosted_gain": True})["errors"] == {
         "rx_boosted_gain": "unsupported"
     }
+
+
+# ─── Per-radio controls on a multi-radio node ───────────────────────────
+
+
+class _Fabric:
+    def __init__(self, radios, default_radio_id):
+        self.radios = radios
+        self.default_radio_id = default_radio_id
+
+
+def _fabric_daemon(radios, default_radio_id):
+    """A daemon whose radio is a FabricRadio behind an adapter, as the repeater builds it."""
+    fabric_radio = SimpleNamespace(fabric=_Fabric(radios, default_radio_id))
+    return SimpleNamespace(radio=SimpleNamespace(_radio=fabric_radio))
+
+
+def _two_radio_config():
+    return {
+        "radio_type": "kiss",
+        "kiss": {"port": "/dev/ttyACM0", "fem_rx_gain": True},
+        "modem_tcp": {"host": "shared", "port": 5055},
+        "repeater": {"agc_reset_interval": 8},
+        "radios": [
+            {"id": "narrow", "radio_type": "kiss"},
+            {"id": "g2", "radio_type": "modem_tcp", "modem_tcp": {"host": "g2", "port": 5055}},
+        ],
+        "fabric": {"default_radio": "narrow"},
+    }
+
+
+def _two_radio_manager(save_ok=True):
+    narrow, g2 = FakeKissRadio(), FakeKissRadio(caps=("agc", "rx", "tx"))
+    config = _two_radio_config()
+    daemon = _fabric_daemon({"narrow": narrow, "g2": g2}, "narrow")
+    mgr = ConfigManager("/tmp/cfg.yaml", config, daemon)
+    mgr.save_to_file = MagicMock(return_value=save_ok)
+    return mgr, config, narrow, g2
+
+
+def test_status_of_a_non_default_radio_reads_that_radio():
+    mgr, _, narrow, g2 = _two_radio_manager()
+    g2.agc, g2.fem["tx_gain"] = 60, True
+
+    status = mgr.kiss_frontend_status("g2")
+
+    assert status["radio_id"] == "g2"
+    assert status["radio_type"] == "modem_tcp"
+    assert status["supports"]["rx_boosted_gain"] is False
+    assert status["running"] == {
+        "agc_reset_interval_seconds": 60,
+        "fem_rx_gain": False,
+        "fem_tx_gain": True,
+    }
+    # g2's own modem_tcp section has no front-end keys; kiss values are not
+    # copied onto a modem, and the legacy repeater key still applies.
+    assert status["configured"] == {"agc_reset_interval_seconds": 8}
+
+
+def test_status_without_a_radio_id_is_the_default_radio():
+    mgr, _, narrow, _ = _two_radio_manager()
+    status = mgr.kiss_frontend_status()
+    assert status["radio_id"] == "narrow"
+    assert status["radio_type"] == "kiss"
+    assert status["running"]["agc_reset_interval_seconds"] == narrow.agc
+
+
+def test_apply_to_a_non_default_radio_sends_and_saves_only_there():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    before_narrow = (narrow.agc, dict(narrow.fem))
+
+    result = mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20, "fem_tx_gain": True}, "g2")
+
+    assert result == {
+        "applied": {"agc_reset_interval_seconds": 20, "fem_tx_gain": True},
+        "errors": {},
+    }
+    assert (g2.agc, g2.fem["tx_gain"]) == (20, True)
+    assert (narrow.agc, narrow.fem) == before_narrow
+    assert config["radios"][1]["modem_tcp"] == {
+        "host": "g2",
+        "port": 5055,
+        "agc_reset_interval_seconds": 20,
+        "fem_tx_gain": True,
+    }
+    assert "modem_tcp" not in config["radios"][0] and "kiss" not in config["radios"][0]
+    assert config["modem_tcp"] == {"host": "shared", "port": 5055}
+    # The legacy key belongs to the default radio; another radio's save keeps it.
+    assert config["repeater"] == {"agc_reset_interval": 8}
+    mgr.save_to_file.assert_called_once()
+
+
+def test_apply_to_a_radio_that_inherits_its_section_copies_it_first():
+    mgr, config, _, g2 = _two_radio_manager()
+    del config["radios"][1]["modem_tcp"]
+
+    mgr.apply_kiss_frontend({"fem_rx_gain": True}, "g2")
+
+    assert config["radios"][1]["modem_tcp"] == {
+        "host": "shared",
+        "port": 5055,
+        "fem_rx_gain": True,
+    }
+    assert config["modem_tcp"] == {"host": "shared", "port": 5055}
+
+
+def test_apply_save_failure_restores_the_radio_entry():
+    mgr, config, _, _ = _two_radio_manager(save_ok=False)
+    before = copy.deepcopy(config)
+
+    result = mgr.apply_kiss_frontend({"fem_rx_gain": True}, "g2")
+
+    assert result["errors"] == {"save": "applied to radio but failed to save config"}
+    assert config == before
+
+
+def test_unknown_radio_id_is_refused_before_any_radio_is_touched():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    before = copy.deepcopy(config)
+    with pytest.raises(KeyError):
+        mgr.kiss_frontend_status("nope")
+    with pytest.raises(KeyError):
+        mgr.apply_kiss_frontend({"fem_rx_gain": True}, "nope")
+    assert config == before
+    assert narrow.fem["rx_gain"] is False and g2.fem["rx_gain"] is False
+
+
+def test_live_update_applies_each_radios_own_settings():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    config["radios"][1]["modem_tcp"]["fem_tx_gain"] = True
+
+    assert mgr._apply_live_kiss_hardware_config()
+
+    assert g2.fem["tx_gain"] is True
+    assert narrow.fem["tx_gain"] is False
+    assert narrow.fem["rx_gain"] is True  # narrow's own kiss section
+
+
+def _two_radio_api():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    api = APIEndpoints.__new__(APIEndpoints)
+    api.config = config
+    api.config_manager = mgr
+    return api, config, narrow, g2
+
+
+@pytest.fixture(params=["missing", "empty_fabric", "deferred", "stopped"])
+def unavailable_radio_api(request):
+    api, config, narrow, g2 = _two_radio_api()
+    mgr = api.config_manager
+    if request.param == "missing":
+        mgr.daemon = _fabric_daemon({"narrow": narrow}, "narrow")
+    elif request.param == "empty_fabric":
+        mgr.daemon = _fabric_daemon({}, "narrow")
+    elif request.param == "deferred":
+        mgr.daemon = SimpleNamespace(radio=None)
+    else:
+        mgr.daemon = None
+    return api, config, narrow, g2
+
+
+_G2_UNAVAILABLE = "radio 'g2' is configured but not running (restart to apply radios[] changes)"
+
+
+def test_endpoint_get_explains_a_configured_radio_that_is_not_running(
+    request_ctx, unavailable_radio_api
+):
+    api, config, narrow, g2 = unavailable_radio_api
+    before = copy.deepcopy(config)
+    result = api.radio_frontend(radio_id="g2")
+
+    assert result["success"] is True
+    status = result["data"]
+    assert status["radio_id"] == "g2"
+    assert status["available"] is False
+    assert status["unavailable_reason"] == _G2_UNAVAILABLE
+    assert status["configured"] == {"agc_reset_interval_seconds": 8}
+    assert status["running"] == {}
+    assert not any(status["supports"].values())
+    assert config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
+@pytest.mark.parametrize("id_in_body", [True, False])
+def test_endpoint_post_to_a_configured_radio_that_is_not_running_is_409(
+    request_ctx, unavailable_radio_api, id_in_body
+):
+    api, config, narrow, g2 = unavailable_radio_api
+    before = copy.deepcopy(config)
+    radios_before = copy.deepcopy((vars(narrow), vars(g2)))
+    api.config_manager.apply_kiss_frontend = MagicMock()
+    request_ctx.method = "POST"
+    request_ctx.json = {"agc_reset_interval_seconds": 20, "fem_tx_gain": True}
+    if id_in_body:
+        request_ctx.json["radio_id"] = "g2"
+
+    result = api.radio_frontend(radio_id=None if id_in_body else "g2")
+
+    assert cherrypy.response.status == 409
+    assert result == {"success": False, "error": _G2_UNAVAILABLE}
+    assert config == before
+    assert (vars(narrow), vars(g2)) == radios_before
+    api.config_manager.apply_kiss_frontend.assert_not_called()
+    api.config_manager.save_to_file.assert_not_called()
+
+
+def test_running_radio_without_frontend_controls_keeps_unsupported_behaviour(request_ctx):
+    api, config, narrow, g2 = _two_radio_api()
+    api.config_manager.daemon = _fabric_daemon({"narrow": narrow, "g2": object()}, "narrow")
+    before = copy.deepcopy(config)
+
+    status = api.radio_frontend(radio_id="g2")["data"]
+    assert status["available"] is False
+    assert "unavailable_reason" not in status
+
+    request_ctx.method = "POST"
+    request_ctx.json = {"radio_id": "g2", "fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert result["success"] is False
+    assert result["data"]["errors"] == {"fem_tx_gain": "unsupported"}
+    assert config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
+@pytest.mark.parametrize("multi_radio", [False, True])
+def test_missing_default_radio_without_an_id_keeps_unsupported_behaviour(request_ctx, multi_radio):
+    api = _two_radio_api()[0] if multi_radio else _api(None)
+    api.config_manager.daemon = None
+    before = copy.deepcopy(api.config)
+
+    status = api.radio_frontend()["data"]
+    assert status["available"] is False
+    assert "unavailable_reason" not in status
+
+    request_ctx.method = "POST"
+    request_ctx.json = {"fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert result["success"] is False
+    assert result["data"]["errors"] == {"fem_tx_gain": "unsupported"}
+    assert "unavailable_reason" not in result["data"]
+    assert api.config == before
+    api.config_manager.save_to_file.assert_not_called()
+
+
+def test_endpoint_get_takes_a_radio_id(request_ctx):
+    api, _, _, g2 = _two_radio_api()
+    g2.agc = 60
+    result = api.radio_frontend(radio_id="g2")
+    assert result["success"] is True
+    assert result["data"]["radio_id"] == "g2"
+    assert result["data"]["running"]["agc_reset_interval_seconds"] == 60
+
+
+def test_endpoint_post_takes_a_radio_id_in_the_body(request_ctx):
+    api, config, narrow, g2 = _two_radio_api()
+    request_ctx.method = "POST"
+    request_ctx.json = {"radio_id": "g2", "fem_tx_gain": True}
+
+    result = api.radio_frontend()
+
+    assert result["success"] is True
+    assert result["data"]["radio_id"] == "g2"
+    assert g2.fem["tx_gain"] is True and narrow.fem["tx_gain"] is False
+    assert config["radios"][1]["modem_tcp"]["fem_tx_gain"] is True
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_endpoint_unknown_radio_id_is_404(request_ctx, method):
+    api, _, _, _ = _two_radio_api()
+    request_ctx.method = method
+    request_ctx.json = {"radio_id": "nope", "fem_tx_gain": True}
+    result = api.radio_frontend(radio_id="nope" if method == "GET" else None)
+    assert cherrypy.response.status == 404
+    assert result == {"success": False, "error": "Unknown radio_id 'nope'"}
+
+
+def test_endpoint_non_string_radio_id_is_400(request_ctx):
+    api, _, _, _ = _two_radio_api()
+    request_ctx.method = "POST"
+    request_ctx.json = {"radio_id": 2, "fem_tx_gain": True}
+    result = api.radio_frontend()
+    assert cherrypy.response.status == 400
+    assert result == {"success": False, "error": "radio_id must be a string"}
+
+
+def test_endpoint_radio_id_on_a_single_radio_node_is_404(request_ctx):
+    api = _api(FakeKissRadio())
+    result = api.radio_frontend(radio_id="narrow")
+    assert cherrypy.response.status == 404
+    assert result["success"] is False
+
+
+def test_default_radio_is_the_running_fabrics_when_the_config_names_another():
+    """A default_radio edited without a restart must not split the read from the save."""
+    mgr, config, narrow, g2 = _two_radio_manager()
+    config["fabric"]["default_radio"] = "g2"  # running fabric still defaults to narrow
+    narrow.agc, g2.agc = 8, 60
+
+    status = mgr.kiss_frontend_status()
+    assert status["radio_id"] == "narrow"
+    assert status["running"]["agc_reset_interval_seconds"] == 8
+
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+    assert (narrow.agc, g2.agc) == (20, 60)
+    assert config["radios"][0]["kiss"]["agc_reset_interval_seconds"] == 20
+    assert "agc_reset_interval_seconds" not in config["radios"][1]["modem_tcp"]
+
+
+def test_mesh_cli_save_follows_the_running_default_radio():
+    mgr, config, _, _ = _two_radio_manager()
+    config["fabric"]["default_radio"] = "g2"
+    assert mgr.persist_default_kiss_settings({"fem_rx_gain": False})
+    assert config["radios"][0]["kiss"]["fem_rx_gain"] is False
+    assert "fem_rx_gain" not in config["radios"][1]["modem_tcp"]
+
+
+def test_saving_the_default_radios_agc_keeps_the_legacy_key_other_radios_inherit():
+    mgr, config, _, _ = _two_radio_manager()
+
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+
+    assert config["repeater"] == {"agc_reset_interval": 8}
+    assert mgr.kiss_frontend_status("g2")["configured"] == {"agc_reset_interval_seconds": 8}
+    assert mgr.kiss_frontend_status()["configured"]["agc_reset_interval_seconds"] == 20
+
+
+def test_single_radio_agc_save_still_retires_the_legacy_key():
+    radio = FakeKissRadio()
+    mgr, config = _manager(
+        radio, {"kiss": {"port": "/dev/x"}, "repeater": {"agc_reset_interval": 8}}
+    )
+    mgr.apply_kiss_frontend({"agc_reset_interval_seconds": 20})
+    assert "agc_reset_interval" not in config["repeater"]
+
+
+def test_live_update_is_not_failed_by_another_radio_that_cannot_take_an_inherited_setting():
+    mgr, config, narrow, g2 = _two_radio_manager()
+    g2.caps = {"rx", "tx"}  # no AGC control, yet it inherits repeater.agc_reset_interval
+
+    assert mgr._apply_live_kiss_hardware_config() is True
+    assert narrow.agc == 8  # the default radio still took the inherited interval
