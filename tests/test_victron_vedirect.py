@@ -137,6 +137,31 @@ def test_manager_protocol_normalization(monkeypatch, label, raw, key, expected):
     assert reading["data"] == {key: expected}
 
 
+def test_slow_port_open_does_not_use_up_the_read_budget(monkeypatch):
+    """The read deadline starts after the port opens, and one read is always made.
+
+    It used to start before the open and was checked before the first read, so an
+    open slower than read_timeout_seconds (0.05 s here) read nothing at all; on a
+    busy CI runner that made the protocol tests fail at random.
+    """
+    import time
+
+    import serial
+
+    port = MagicMock()
+    port.__enter__.return_value = port
+    port.read.return_value = frame({"V": "12400", "FW": "123"})
+
+    def slow_open(*args, **kwargs):
+        time.sleep(0.06)
+        return port
+
+    monkeypatch.setattr(serial, "Serial", slow_open)
+    reading = manager().read_all()[0]
+    assert reading["ok"], reading
+    assert reading["data"] == {"battery_voltage_v": 12.4}
+
+
 @pytest.mark.parametrize(
     "fields,expected",
     [
