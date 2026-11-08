@@ -1,3 +1,4 @@
+import copy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -783,6 +784,115 @@ def _kiss_cli(radio, cfg=None, save_ok=True):
     mgr.save_to_file = MagicMock(return_value=save_ok)
     mgr.live_update_daemon = MagicMock()
     return MeshCLI("/tmp/cfg.yaml", cfg, mgr), cfg, mgr
+
+
+def _frontend_fabric_cli():
+    narrow, g2 = FakeKissRadio(), FakeKissRadio()
+    cfg = _base_config()
+    cfg.update(
+        {
+            "radio_type": "kiss",
+            "kiss": {"port": "/dev/narrow"},
+            "radios": [
+                {"id": "narrow", "radio_type": "kiss"},
+                {"id": "g2", "radio_type": "modem_tcp", "modem_tcp": {"host": "g2"}},
+            ],
+            # An edited default takes effect at restart; the running default is narrow.
+            "fabric": {"default_radio": "g2"},
+        }
+    )
+    fabric = SimpleNamespace(radios={"narrow": narrow, "g2": g2}, default_radio_id="narrow")
+    cli, cfg, mgr = _kiss_cli(SimpleNamespace(_radio=SimpleNamespace(fabric=fabric)), cfg)
+    return cli, cfg, mgr, narrow, g2
+
+
+_FRONTEND_COMMANDS = [
+    (
+        "agc.reset.interval",
+        "10",
+        "agc_reset_interval_seconds",
+        8,
+        "> 32",
+        "> 8",
+        "OK - interval now 8",
+    ),
+    ("radio.fem.rxgain", "on", "fem_rx_gain", True, "> off", "> on", "OK"),
+    ("radio.fem.txgain", "on", "fem_tx_gain", True, "> off", "> on", "OK"),
+    ("radio.rxgain", "off", "rx_boosted_gain", False, "> on", "> off", "OK"),
+]
+
+
+@pytest.mark.parametrize("key,value,setting,effective,before,after,reply", _FRONTEND_COMMANDS)
+@pytest.mark.parametrize("radio_id", [None, "g2", "narrow"])
+def test_frontend_commands_select_and_persist_one_radio(
+    key, value, setting, effective, before, after, reply, radio_id
+):
+    cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
+    suffix = f" {radio_id}" if radio_id else ""
+    index, section = (1, "modem_tcp") if radio_id == "g2" else (0, "kiss")
+    other = narrow if radio_id == "g2" else g2
+    other_before = copy.deepcopy(vars(other))
+    config_before = copy.deepcopy(cfg)
+
+    assert cli._cmd_get(f"{key}{suffix}") == before
+    assert cli._cmd_set(f"{key} {value}{suffix}") == reply
+    assert cli._cmd_get(f"{key}{suffix}") == after
+    assert cfg["radios"][index][section][setting] == effective
+    assert vars(other) == other_before
+    assert cfg["radios"][1 - index] == config_before["radios"][1 - index]
+    assert cfg["kiss"] == config_before["kiss"]
+    assert cfg["repeater"] == config_before["repeater"]
+    mgr.save_to_file.assert_called_once_with()
+
+
+@pytest.mark.parametrize("key,value,setting,effective,before,after,reply", _FRONTEND_COMMANDS)
+@pytest.mark.parametrize("single_radio", [False, True])
+def test_frontend_commands_reject_unknown_ids_without_changes(
+    key, value, setting, effective, before, after, reply, single_radio
+):
+    if single_radio:
+        radio = FakeKissRadio()
+        cli, cfg, mgr = _kiss_cli(radio)
+        radios = [radio]
+        known = "none (single-radio node)"
+    else:
+        cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
+        radios = [narrow, g2]
+        known = "narrow, g2"
+    config_before = copy.deepcopy(cfg)
+    radios_before = [copy.deepcopy(vars(radio)) for radio in radios]
+    error = f"Error: unknown radio id 'missing'; known ids: {known}"
+
+    assert cli._cmd_get(f"{key} missing") == error
+    assert cli._cmd_set(f"{key} {value} missing") == error
+    assert cfg == config_before
+    assert [vars(radio) for radio in radios] == radios_before
+    mgr.save_to_file.assert_not_called()
+
+
+def test_frontend_agc_validates_the_selected_radios_range():
+    cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
+    g2.effective_agc_reset_interval = lambda seconds: seconds if 0 <= seconds <= 60 else None
+    g2.set_agc_reset_interval = MagicMock()
+    before = copy.deepcopy(cfg)
+
+    assert cli._cmd_set("agc.reset.interval 64 g2") == (
+        "Error: AGC reset interval 64 is outside this radio's range (0-60 seconds)"
+    )
+    assert cli._cmd_set("agc.reset.interval 3601 g2") == "Error: must be 0-3600"
+    g2.set_agc_reset_interval.assert_not_called()
+    assert narrow.agc == 32
+    assert cfg == before
+    mgr.save_to_file.assert_not_called()
+
+
+@pytest.mark.parametrize("key", ["radio.fem.rxgain", "radio.fem.txgain", "radio.rxgain"])
+def test_frontend_gain_with_id_still_requires_on_or_off(key):
+    cli, cfg, mgr, narrow, g2 = _frontend_fabric_cli()
+    before = copy.deepcopy(cfg)
+    assert cli._cmd_set(f"{key} maybe g2") == "Error: must be on or off"
+    assert cfg == before
+    mgr.save_to_file.assert_not_called()
 
 
 def test_agc_get_reads_the_running_modem_not_config():
