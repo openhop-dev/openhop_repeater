@@ -4757,7 +4757,12 @@ class SQLiteHandler:
     def get_unsynced_messages(
         self, room_hash: str, client_pubkey: str, sync_since: float, limit: int = 100
     ) -> List[Dict]:
-        """Get messages for a room that client hasn't synced yet."""
+        """Get messages for a room that client hasn't synced yet.
+
+        Compared in whole seconds: the wire timestamp (and so the sync_since a
+        client logs in with) is a uint32, while older rows hold fractional
+        times. Comparing those directly re-pushed the client's newest post.
+        """
         try:
             with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
@@ -4765,7 +4770,7 @@ class SQLiteHandler:
                     """
                     SELECT * FROM room_messages
                     WHERE room_hash = ?
-                    AND post_timestamp > ?
+                    AND CAST(post_timestamp AS INTEGER) > CAST(? AS INTEGER)
                     AND author_pubkey != ?
                     ORDER BY post_timestamp ASC
                     LIMIT ?
@@ -4993,7 +4998,7 @@ class SQLiteHandler:
                     SELECT COUNT(*) FROM room_messages
                     WHERE room_hash = ?
                     AND author_pubkey != ?
-                    AND post_timestamp > ?
+                    AND CAST(post_timestamp AS INTEGER) > CAST(? AS INTEGER)
                 """,
                     (room_hash, client_pubkey, sync_since),
                 )
