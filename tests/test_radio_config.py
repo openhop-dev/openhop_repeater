@@ -62,6 +62,78 @@ def test_get_radio_for_board_missing_radio_type_returns_null_radio():
     assert type(radio).__name__ == "NullRadio"
 
 
+# ─── sx1276 branch ─────────────────────────────────────────────────────
+
+
+def _capture_sx1276(monkeypatch):
+    """Replace SX1276Radio with a dummy that records its constructor kwargs."""
+    pytest.importorskip("openhop_core.hardware.sx1276_wrapper")
+    captured = {}
+
+    class _DummySX1276Radio(_DummyRadio):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("openhop_core.hardware.sx1276_wrapper.SX1276Radio", _DummySX1276Radio)
+    return captured
+
+
+def _sx1276_radio_cfg():
+    return {
+        "frequency": 869618000,
+        "tx_power": 20,
+        "spreading_factor": 8,
+        "bandwidth": 62500,
+        "coding_rate": 8,
+        "preamble_length": 32,
+        "sync_word": 0x12,
+    }
+
+
+def test_get_radio_for_board_sx1276_reads_its_own_section(monkeypatch):
+    captured = _capture_sx1276(monkeypatch)
+
+    get_radio_for_board(
+        {
+            "radio_type": "sx1276",
+            "sx1276": {"cs_pin": 7, "reset_pin": 22, "irq_pin": 27, "current_limit_ma": 100},
+            "sx1262": {"cs_pin": 25, "reset_pin": 17, "irq_pin": 4},
+            "radio": _sx1276_radio_cfg(),
+        }
+    )
+
+    assert (captured["cs_pin"], captured["reset_pin"], captured["irq_pin"]) == (7, 22, 27)
+    assert captured["current_limit_ma"] == 100
+    assert captured["frequency"] == 869618000
+    assert captured["bandwidth"] == 62500
+    assert captured["tx_power"] == 20
+    assert captured["sync_word"] == 0x12
+
+
+def test_get_radio_for_board_sx1276_falls_back_to_the_wizard_sx1262_section(monkeypatch):
+    # The web setup wizard writes board pins under 'sx1262' whatever the chip.
+    captured = _capture_sx1276(monkeypatch)
+
+    get_radio_for_board(
+        {
+            "radio_type": "sx1276",
+            "sx1262": {"cs_pin": 25, "reset_pin": 17, "irq_pin": 4, "busy_pin": -1},
+            "radio": _sx1276_radio_cfg(),
+        }
+    )
+
+    assert (captured["cs_pin"], captured["reset_pin"], captured["irq_pin"]) == (25, 17, 4)
+    assert captured["current_limit_ma"] == 120
+    assert "busy_pin" not in captured
+
+
+def test_get_radio_for_board_sx1276_requires_a_pin_section(monkeypatch):
+    _capture_sx1276(monkeypatch)
+
+    with pytest.raises(ValueError, match="sx1276"):
+        get_radio_for_board({"radio_type": "sx1276", "radio": _sx1276_radio_cfg()})
+
+
 # ─── modem_tcp / modem_usb branches ────────────────────────────────────
 
 
