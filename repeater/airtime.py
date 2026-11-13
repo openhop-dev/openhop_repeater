@@ -16,11 +16,10 @@ class AirtimeManager:
         radio_config: Optional[dict] = None,
         max_airtime_per_minute: Optional[float] = None,
     ):
-        """Meter one channel's duty cycle.
+        """Meter one configured duty-cycle budget.
 
         ``radio_config`` and ``max_airtime_per_minute`` override the top-level
-        ``radio`` and ``duty_cycle`` sections, for a Fabric node that meters each
-        radio against its own modulation and its own band's limit. Omitted, both
+        ``radio`` and ``duty_cycle`` sections for a Fabric node. Omitted, both
         come from the config as they always have.
         """
         self.config = config
@@ -241,42 +240,34 @@ def _snapshot(ledger: AirtimeManager) -> Tuple[list, float, float]:
 class _BudgetState:
     by_radio: dict
     order: list
-    by_channel: dict
-    channel_of: dict
+    by_budget: dict
+    budget_of: dict
+    scope: str
     profile_backed: bool
     default_radio_id: Optional[str]
     default: _RadioAirtimeBudget
 
 
 class AirtimeBudgets:
-    """The duty-cycle budgets a node meters against: one per channel.
+    """Radio-aware airtime calculators backed by configurable duty-cycle ledgers.
 
-    Duty cycle is a limit on a channel, not on a node. A single manager charging
-    every radio at one modulation is wrong in both directions on a dual-frequency
-    bridge: the same packet occupies a 62.5 kHz channel about eight times longer
-    than a 500 kHz one, so whichever bandwidth the top-level ``radio`` block
-    names, the other radio is mis-charged by that factor. Sharing one budget
-    compounds it -- a busy local radio spends the backhaul's allowance, on a band
-    it never transmits on.
+    Every radio always calculates packet airtime from its own modulation. Which
+    radios debit the same rolling ledger is an independent deployment policy:
+    per radio, per channel, node-wide, or an explicit named group. ``channel``
+    remains the compatibility default and ``shared_budget`` remains a legacy
+    spelling for the node-wide scope.
 
-    So each radio is metered on its own, with its own modulation and its own
-    band's limit. Two radios on the same channel share one manager, because they
-    do contend for the same spectrum: two transmitters on 869.618 MHz are one
-    channel's worth of traffic however the node labels them.
-
-    A single-radio node gets exactly one manager built from the top-level
-    sections, which is what it had before this existed.
+    A single-radio node still gets exactly one manager built from the top-level
+    sections, which is what it had before RF Fabric accounting existed.
     """
 
     def __init__(self, config: dict):
         self.config = config
         self._lock = threading.RLock()
-        # One ledger per channel, kept for as long as that channel matters --
-        # across rebuilds, and after the last radio leaves it. A duty cycle is a
-        # property of the spectrum, not of whichever radio happens to be tuned
-        # there, so the ledger has to outlive the radio's assignment to it.
+        # One ledger per resolved budget key, retained across rebuilds and after
+        # the last radio leaves it until its rolling window has expired.
         self._ledgers: dict = {}
-        # Lifetime totals of channels dropped once their window emptied, so the
+        # Lifetime totals of budgets dropped once their window emptied, so the
         # node total still counts airtime the node really did transmit.
         self._retired_tx = 0.0
         self._retired_rx = 0.0
@@ -295,7 +286,14 @@ class AirtimeBudgets:
     # ------------------------------------------------------------------
 
     def _build_state(self) -> _BudgetState:
-        from .config import build_metering_profiles
+        from .config import (
+            build_metering_profiles,
+            duty_cycle_budget_groups,
+            validate_duty_cycle_config,
+        )
+
+        scope = validate_duty_cycle_config(self.config)
+        groups = duty_cycle_budget_groups(self.config) if scope == "explicit" else {}
 
         try:
             profiles = build_metering_profiles(self.config)
@@ -315,44 +313,40 @@ class AirtimeBudgets:
             return _BudgetState(
                 by_radio={None: view},
                 order=[None],
-                by_channel={None: ledger},
-                channel_of={None: None},
+                by_budget={None: ledger},
+                budget_of={None: None},
+                scope=scope,
                 profile_backed=False,
                 default_radio_id=None,
                 default=view,
             )
 
-        shared = bool(self.config.get("duty_cycle", {}).get("shared_budget", False))
         order = []
-        channel_of = {}
+        budget_of = {}
         effective = {}
         for profile in profiles:
             radio_id = str(profile["radio_id"])
             order.append(radio_id)
             air = self._effective_air(profile)
             effective[radio_id] = air
-            # Keyed on what this radio is really transmitting with, so a pending
-            # retune does not move it onto a channel it is not on yet.
-            channel_of[radio_id] = (
-                "shared" if shared else (air.get("frequency"), air.get("bandwidth"))
-            )
+            budget_of[radio_id] = self._budget_key(scope, radio_id, air, groups)
         self._metered_air = effective
 
-        by_channel = {}
+        by_budget = {}
         by_radio = {}
         for profile in profiles:
             radio_id = str(profile["radio_id"])
-            key = channel_of[radio_id]
-            ledger = by_channel.get(key)
+            key = budget_of[radio_id]
+            ledger = by_budget.get(key)
             if ledger is None:
                 ledger = self._ledger_for(
                     key,
                     effective[radio_id],
-                    self._channel_budget(
-                        [rid for rid, rid_key in channel_of.items() if rid_key == key]
+                    self._budget_limit(
+                        [rid for rid, rid_key in budget_of.items() if rid_key == key]
                     ),
                 )
-                by_channel[key] = ledger
+                by_budget[key] = ledger
             calculator = AirtimeManager(
                 self.config,
                 radio_config=effective[radio_id],
@@ -360,17 +354,31 @@ class AirtimeBudgets:
             )
             by_radio[radio_id] = _RadioAirtimeBudget(ledger, calculator, self._lock)
 
-        self._prune_retired(set(by_channel))
+        self._prune_retired(set(by_budget))
         default_radio_id = self._default_radio_id(by_radio, order)
         return _BudgetState(
             by_radio=by_radio,
             order=order,
-            by_channel=by_channel,
-            channel_of=channel_of,
+            by_budget=by_budget,
+            budget_of=budget_of,
+            scope=scope,
             profile_backed=True,
             default_radio_id=default_radio_id,
             default=by_radio[default_radio_id],
         )
+
+    @staticmethod
+    def _budget_key(scope: str, radio_id: str, air: dict, groups: dict):
+        """Stable, namespaced key for the configured accounting policy."""
+        if scope == "radio":
+            return ("radio", radio_id)
+        if scope == "shared":
+            return ("shared",)
+        if scope == "explicit":
+            return ("explicit", groups[radio_id])
+        # Keyed on what the radio is really transmitting with, so a pending
+        # restart-required retune does not move it onto a channel it is not on.
+        return ("channel", air.get("frequency"), air.get("bandwidth"))
 
     def _ledger_for(
         self,
@@ -378,13 +386,13 @@ class AirtimeBudgets:
         radio_config: Optional[dict],
         max_airtime_per_minute: Optional[float],
     ) -> AirtimeManager:
-        """The ledger for one channel, kept across rebuilds.
+        """The ledger for one resolved budget key, kept across rebuilds.
 
-        A channel's spend belongs to the spectrum, so the ledger persists and is
-        simply re-tuned when a radio on it changes modulation or limit. Nothing
-        is copied between channels: copying is what let a split hand the same
-        history to both sides and a later merge add the copies together, so a
-        node could double its recorded spend by retuning a radio back and forth.
+        The ledger persists and is simply re-tuned when a radio on it changes
+        modulation or limit. Nothing is copied between keys: copying is what
+        let a split hand the same history to both sides and a later merge add
+        the copies together, so a node could double its recorded spend by
+        retuning a radio back and forth.
         """
         ledger = self._ledgers.get(key)
         if ledger is not None:
@@ -408,11 +416,10 @@ class AirtimeBudgets:
         return ledger
 
     def _seed_for(self, key):
-        """What a channel with no ledger of its own should start from.
+        """What a budget key with no ledger of its own should start from.
 
-        A frequency this node has not transmitted on starts empty, because it
-        has not: duty cycle is per channel, and a radio arriving from a busy
-        band brings none of that band's spend with it.
+        A new, identified key starts empty. It represents a separate accounting
+        domain selected by the configured policy.
 
         The exception is a channel nobody can name. ``None`` is the key used
         when the radio profiles cannot be read, and it stands for "some channel,
@@ -428,14 +435,14 @@ class AirtimeBudgets:
         return None
 
     def _busiest_snapshot(self, exclude=None):
-        """The retained channel with the most airtime still inside the window."""
+        """The retained budget with the most airtime still inside the window."""
         candidates = [ledger for channel, ledger in self._ledgers.items() if channel is not exclude]
         if not candidates:
             return None
         return _snapshot(max(candidates, key=_window_ms))
 
     def _prune_retired(self, present_keys: set) -> None:
-        """Drop channels nobody is on once their window has emptied.
+        """Drop budgets nobody uses once their window has emptied.
 
         Their lifetime totals move to the node's running totals rather than
         vanishing -- the node did transmit that airtime -- but the ledger itself
@@ -453,7 +460,7 @@ class AirtimeBudgets:
             del self._ledgers[key]
 
     def _absent_totals(self, present) -> Tuple[float, float]:
-        """Lifetime totals of channels still retained but with no radio on them."""
+        """Lifetime totals of retained budgets with no radio currently on them."""
         total_tx = self._retired_tx
         total_rx = self._retired_rx
         for key, ledger in self._ledgers.items():
@@ -504,8 +511,8 @@ class AirtimeBudgets:
                 return dict(previous)
         return settings
 
-    def _channel_budget(self, radio_ids: list) -> Optional[float]:
-        """The limit for a channel several radios may sit on: the strictest one.
+    def _budget_limit(self, radio_ids: list) -> Optional[float]:
+        """The limit for a ledger several radios may share: the strictest one.
 
         Taking the first radio's would let a second radio configured for a 1%
         band transmit against a 10% allowance, which is the wrong direction to
@@ -569,6 +576,14 @@ class AirtimeBudgets:
         """
         with self._lock:
             previous = self._state
+            from .config import validate_duty_cycle_config
+
+            next_scope = validate_duty_cycle_config(self.config)
+            if next_scope != previous.scope:
+                raise ValueError(
+                    "Changing duty_cycle.budget_scope requires a service restart "
+                    "so the active rolling window is not regrouped mid-flight"
+                )
             self._adopt_air = None if adopt_air_for is None else set(adopt_air_for)
             try:
                 rebuilt = self._build_state()
@@ -643,13 +658,19 @@ class AirtimeBudgets:
         with self._lock:
             return self._state.profile_backed
 
+    @property
+    def budget_scope(self) -> str:
+        """Resolved accounting scope, including the legacy shared-budget mapping."""
+        with self._lock:
+            return self._state.scope
+
     def radio_ids(self) -> list:
         """Configured radio ids, in order. ``[None]`` when nothing was profiled."""
         with self._lock:
             return list(self._state.order)
 
     def shares_budget(self, first_radio_id: Optional[str], second_radio_id: Optional[str]) -> bool:
-        """Whether two radios debit the same channel ledger."""
+        """Whether two radios debit the same configured ledger."""
         with self._lock:
             first = self.for_radio(first_radio_id)
             second = self.for_radio(second_radio_id)
@@ -674,17 +695,33 @@ class AirtimeBudgets:
     def per_radio_stats(self) -> list:
         """``[{radio_id, ...stats}]`` on a multi-radio node, else an empty list.
 
-        Radios sharing a channel report the same figures, because they are the
-        same budget: that is the statement, not a duplication.
+        Radios sharing a configured ledger report the same figures. Scope and
+        budget id make that relationship explicit to operators.
         """
         with self._lock:
             state = self._state
             if len(state.order) <= 1:
                 return []
             return [
-                {"radio_id": radio_id, **state.by_radio[radio_id].get_stats()}
+                {
+                    "radio_id": radio_id,
+                    "budget_scope": state.scope,
+                    "budget_id": self._display_budget_key(state.budget_of[radio_id]),
+                    **state.by_radio[radio_id].get_stats(),
+                }
                 for radio_id in state.order
             ]
+
+    @staticmethod
+    def _display_budget_key(key) -> str:
+        """Stable human-readable identifier for API statistics."""
+        if key is None:
+            return "default"
+        if key[0] == "channel":
+            return f"{key[1]}:{key[2]}"
+        if key[0] == "shared":
+            return "shared"
+        return str(key[1])
 
     def node_stats(self) -> dict:
         """One set of figures for the whole node, in AirtimeManager's shape.
@@ -692,22 +729,21 @@ class AirtimeBudgets:
         For the callers that have always reported a single number: the MeshCore
         wire field ``total_air_time_secs``, companion stats, the RRD and SQLite
         history, and ``/stats``. Reading the default radio's manager instead
-        would have each of them describe one channel of a node that transmits on
-        two, which is a quiet regression in figures people have been watching
-        for months.
+        would have each of them describe only one budget of a node that transmits
+        through several, which is a quiet regression in figures people have
+        been watching for months.
 
-        Totals and the current window are summed across the distinct channels,
-        because the node really did spend all of it. Utilisation is the highest
-        of them, not the ratio of the sums: a node whose narrow channel is at its
-        legal limit is at a limit, and averaging that against an idle wide
-        channel reports 14% for a radio that must stop transmitting.
+        Totals and the current window are summed across distinct budgets because
+        the node really did spend all of it. Utilisation is the highest of them,
+        not the ratio of the sums: if one budget is exhausted, averaging it
+        against an idle budget would hide that a radio must stop transmitting.
 
         On a single-radio node every figure is that one manager's, unchanged.
         """
         with self._lock:
-            present = self._state.by_channel
+            present = self._state.by_budget
             managers = list(present.values())
-            # Airtime the node transmitted on channels no radio sits on any
+            # Airtime the node transmitted against budgets no radio uses any
             # more. A retune does not un-transmit it, and these are lifetime
             # counters, so it still belongs in the node's total.
             absent_tx, absent_rx = self._absent_totals(set(present))
@@ -716,8 +752,8 @@ class AirtimeBudgets:
 
             stats = [manager.get_stats() for manager in managers]
             return {
-                # The window and the limit describe the channels the node is on
-                # now; a channel it has left cannot be transmitted on.
+                # The window and limit describe active budgets. A retired budget
+                # cannot be used for a current transmission.
                 "current_airtime_ms": sum(s["current_airtime_ms"] for s in stats),
                 "max_airtime_ms": sum(s["max_airtime_ms"] for s in stats),
                 "utilization_percent": max(s["utilization_percent"] for s in stats),

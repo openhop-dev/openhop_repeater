@@ -1,9 +1,4 @@
-"""Duty cycle metered per channel rather than per node.
-
-Duty cycle is a limit on a channel. A bridge runs two, and the same packet
-occupies a 62.5 kHz channel about eight times longer than a 500 kHz one, so one
-manager charging both at one modulation is wrong in both directions at once.
-"""
+"""Radio-aware duty-cycle metering with configurable budget grouping."""
 
 from __future__ import annotations
 
@@ -13,18 +8,21 @@ from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from openhop_core.protocol import Packet
 from openhop_core.protocol.constants import (
     PAYLOAD_TYPE_TXT_MSG,
     PH_TYPE_SHIFT,
     ROUTE_TYPE_FLOOD,
 )
-
 from openhop_core.rf_fabric import RFFabric
 
 from repeater.airtime import AirtimeBudgets, AirtimeManager
-from repeater.config import _apply_fabric_tx_mode, fabric_selects_by_ingress_radio
+from repeater.config import (
+    _apply_fabric_tx_mode,
+    fabric_selects_by_ingress_radio,
+    resolve_duty_cycle_budget_scope,
+    validate_duty_cycle_config,
+)
 from repeater.engine import RepeaterHandler
 
 WIDE = {
@@ -113,6 +111,146 @@ def test_radios_on_one_channel_share_a_budget():
 
     budgets.for_radio("north").record_tx(3600)
     assert budgets.for_radio("south").can_transmit(10)[0] is False
+
+
+def test_channel_scope_remains_the_compatibility_default():
+    same = [_radio("north", WIDE), _radio("south", WIDE)]
+    config = _config(same)
+
+    budgets = AirtimeBudgets(config)
+
+    assert resolve_duty_cycle_budget_scope(config) == "channel"
+    assert budgets.budget_scope == "channel"
+    assert budgets.shares_budget("north", "south")
+
+
+def test_radio_scope_keeps_identical_channels_independent():
+    same = [_radio("north", WIDE), _radio("south", WIDE)]
+    budgets = AirtimeBudgets(_config(same, budget_scope="radio"))
+
+    assert budgets.budget_scope == "radio"
+    assert not budgets.shares_budget("north", "south")
+
+    budgets.for_radio("north").record_tx(3600)
+    assert budgets.for_radio("north").can_transmit(10)[0] is False
+    assert budgets.for_radio("south").can_transmit(10)[0] is True
+
+
+def test_radio_scope_keeps_a_radios_window_when_it_retunes():
+    config = _config(BRIDGE, budget_scope="radio")
+    budgets = AirtimeBudgets(config)
+    budgets.for_radio("link").record_tx(3000)
+
+    config["radios"][1]["radio"] = dict(WIDE)
+    budgets.refresh()
+
+    assert budgets.for_radio("link").get_stats()["current_airtime_ms"] == 3000
+    assert budgets.for_radio("link").can_transmit(1000)[0] is False
+
+
+def test_shared_scope_and_legacy_switch_select_one_node_ledger():
+    explicit = AirtimeBudgets(_config(BRIDGE, budget_scope="shared"))
+    legacy = AirtimeBudgets(_config(BRIDGE, shared_budget=True))
+
+    assert explicit.budget_scope == "shared"
+    assert legacy.budget_scope == "shared"
+    assert explicit.shares_budget("local", "link")
+    assert legacy.shares_budget("local", "link")
+
+
+def test_explicit_scope_shares_only_named_groups():
+    radios = [
+        _radio("a", WIDE, duty_cycle={"budget_group": "site-a"}),
+        _radio("b", NARROW, duty_cycle={"budget_group": "site-a"}),
+        _radio("c", WIDE, duty_cycle={"budget_group": "site-c"}),
+    ]
+    budgets = AirtimeBudgets(_config(radios, budget_scope="explicit"))
+
+    assert budgets.budget_scope == "explicit"
+    assert budgets.shares_budget("a", "b")
+    assert not budgets.shares_budget("a", "c")
+
+
+def test_explicit_scope_uses_the_strictest_limit_in_a_group():
+    radios = [
+        _radio(
+            "a",
+            WIDE,
+            duty_cycle={"budget_group": "shared-domain", "max_airtime_per_minute": 6000},
+        ),
+        _radio(
+            "b",
+            NARROW,
+            duty_cycle={"budget_group": "shared-domain", "max_airtime_per_minute": 600},
+        ),
+    ]
+    budgets = AirtimeBudgets(_config(radios, budget_scope="explicit"))
+
+    assert budgets.for_radio("a").max_airtime_per_minute == 600
+    assert budgets.for_radio("b").max_airtime_per_minute == 600
+
+
+def test_stats_explain_the_resolved_scope_and_budget_id():
+    radios = [
+        _radio("a", WIDE, duty_cycle={"budget_group": "shared-domain"}),
+        _radio("b", NARROW, duty_cycle={"budget_group": "shared-domain"}),
+    ]
+    budgets = AirtimeBudgets(_config(radios, budget_scope="explicit"))
+
+    stats = {entry["radio_id"]: entry for entry in budgets.per_radio_stats()}
+
+    assert stats["a"]["budget_scope"] == "explicit"
+    assert stats["a"]["budget_id"] == "shared-domain"
+    assert stats["b"]["budget_id"] == "shared-domain"
+
+
+@pytest.mark.parametrize("scope", ["radio", "channel", "shared"])
+def test_config_validation_accepts_each_non_explicit_scope(scope):
+    assert validate_duty_cycle_config(_config(BRIDGE, budget_scope=scope)) == scope
+
+
+def test_explicit_scope_requires_a_group_for_every_radio():
+    config = _config(
+        [
+            _radio("local", WIDE, duty_cycle={"budget_group": "local"}),
+            _radio("link", NARROW),
+        ],
+        budget_scope="explicit",
+    )
+
+    with pytest.raises(ValueError, match=r"radios\[1\].*budget_group is required"):
+        validate_duty_cycle_config(config)
+
+
+def test_explicit_scope_requires_each_radio_to_have_an_id():
+    config = _config(
+        [_radio("local", WIDE, duty_cycle={"budget_group": "local"}), {"radio": NARROW}],
+        budget_scope="explicit",
+    )
+
+    with pytest.raises(ValueError, match=r"radios\[1\]\.id is required"):
+        validate_duty_cycle_config(config)
+
+
+def test_invalid_or_conflicting_scope_is_rejected():
+    with pytest.raises(ValueError, match="budget_scope must be one of"):
+        validate_duty_cycle_config(_config(BRIDGE, budget_scope="country-default"))
+
+    with pytest.raises(ValueError, match="conflicts"):
+        validate_duty_cycle_config(_config(BRIDGE, budget_scope="radio", shared_budget=True))
+
+
+def test_live_scope_change_requires_restart_without_regrouping_the_window():
+    config = _config(BRIDGE)
+    budgets = AirtimeBudgets(config)
+    budgets.for_radio("local").record_tx(900)
+    config["duty_cycle"]["budget_scope"] = "radio"
+
+    with pytest.raises(ValueError, match="requires a service restart"):
+        budgets.refresh()
+
+    assert budgets.budget_scope == "channel"
+    assert budgets.for_radio("local").get_stats()["current_airtime_ms"] == 900
 
 
 def test_radios_on_one_channel_keep_their_own_modulation():
