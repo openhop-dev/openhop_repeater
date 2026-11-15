@@ -22,6 +22,9 @@ from openhop_core.protocol.cayenne_lpp import (
     TELEM_CHANNEL_SELF,
     encode_barometric_pressure,
     encode_current,
+    encode_direction,
+    encode_luminosity,
+    encode_percentage,
     encode_power,
     encode_relative_humidity,
     encode_temperature,
@@ -309,9 +312,18 @@ class ProtocolRequestHelper:
         inverse_mask = req_data[0] if len(req_data) >= 1 else 0
         perm_mask = (~inverse_mask) & 0xFF
 
-        # Guests get base telemetry only (firmware: PERM_ACL_GUEST -> perm_mask 0).
+        # Guests get base telemetry only (firmware: PERM_ACL_GUEST -> perm_mask 0)
+        # unless the operator opts in with repeater.telemetry.guest_environment,
+        # which publishes the local sensor block (weather, supply voltage) to any
+        # client holding the guest password. Off by default: the firmware grant
+        # is a privacy boundary, not an oversight.
         if hasattr(client, "is_guest") and client.is_guest():
-            perm_mask = 0x00
+            if self._guest_environment_allowed():
+                # Narrow, never widen: a guest may only claim the environment
+                # grant, whatever inverse mask it sent.
+                perm_mask &= TELEM_PERM_ENVIRONMENT
+            else:
+                perm_mask = 0x00
 
         readings = self._get_sensor_readings()
 
@@ -319,16 +331,20 @@ class ProtocolRequestHelper:
         # else 0.0 V (voltage-only floor, mirroring the companion self-telemetry).
         lpp = bytearray(encode_voltage(TELEM_CHANNEL_SELF, self._battery_voltage(readings)))
 
-        # One channel per sensor reading (matches firmware channel assignment).
+        # Each sensor reading owns TELEM_CHANNEL_STRIDE channels (see the map on
+        # _encode_sensor_reading), mirroring the firmware's per-device channels.
         if perm_mask & TELEM_PERM_ENVIRONMENT:
             channel = TELEM_CHANNEL_SELF + 1
             for reading in readings:
-                entry = self._encode_power_reading(
-                    channel, reading
-                ) + self._encode_environment_reading(channel, reading)
+                if channel + self.TELEM_CHANNEL_STRIDE - 1 > 0xFF:
+                    logger.warning(
+                        "Telemetry channel space exhausted at channel %d; dropping remaining readings",
+                        channel,
+                    )
+                    break
+                entry, channel = self._encode_sensor_reading(channel, reading)
                 if entry:
                     lpp.extend(entry)
-                    channel += 1
 
         logger.debug(
             "GET_TELEMETRY: perm_mask=0x%02X, %d LPP bytes",
@@ -336,6 +352,13 @@ class ProtocolRequestHelper:
             len(lpp),
         )
         return bytes(lpp)
+
+    def _guest_environment_allowed(self) -> bool:
+        """True when repeater.telemetry.guest_environment is enabled."""
+        config = self.config if isinstance(self.config, dict) else {}
+        section = config.get("repeater", {})
+        telemetry = section.get("telemetry", {}) if isinstance(section, dict) else {}
+        return bool(telemetry.get("guest_environment", False)) if isinstance(telemetry, dict) else False
 
     def _get_sensor_readings(self):
         """Return the latest cached sensor readings (empty list if unavailable)."""
@@ -427,6 +450,109 @@ class ProtocolRequestHelper:
             except (TypeError, ValueError):
                 pass
         return bytes(out)
+
+    # ---- telemetry channel map -------------------------------------------
+    # Each sensor reading owns TELEM_CHANNEL_STRIDE channels so a quantity group
+    # keeps a stable channel even when an earlier group is empty. The order is
+    # part of the wire contract; clients decode by (channel, type):
+    #
+    #   +0  power        voltage, current, power (one rail)
+    #   +1  environment  temperature, humidity, barometric pressure
+    #   +2  wind         direction (deg)
+    #   +3  supply       supply/array voltage, battery %
+    #   +4  illuminance  only when the sensor reports real lux
+    #
+    # Only quantities with a real CayenneLPP type are emitted. Wind SPEED, rain
+    # rate, rain totals and UV index have no LPP type, and carrying them in a
+    # generic numeric field makes clients render them as "Analog Input", which
+    # reads as a wrong measurement rather than a missing one - they stay in the
+    # reading dict for the web UI/MQTT and off the air.
+    TELEM_CHANNEL_STRIDE = 5
+    TELEM_GROUP_POWER = 0
+    TELEM_GROUP_ENVIRONMENT = 1
+    TELEM_GROUP_WIND = 2
+    TELEM_GROUP_SUPPLY = 3
+    TELEM_GROUP_SOLAR = 4
+
+    @classmethod
+    def _encode_sensor_reading(cls, channel: int, reading):
+        """Encode one reading across the channel map; returns (bytes, next channel)."""
+        out = bytearray()
+        out.extend(cls._encode_power_group(channel + cls.TELEM_GROUP_POWER, reading))
+        out.extend(
+            cls._encode_environment_reading(channel + cls.TELEM_GROUP_ENVIRONMENT, reading)
+        )
+        out.extend(cls._encode_wind_group(channel + cls.TELEM_GROUP_WIND, reading))
+        out.extend(cls._encode_solar_group(channel + cls.TELEM_GROUP_SOLAR, reading))
+        out.extend(cls._encode_supply_group(channel + cls.TELEM_GROUP_SUPPLY, reading))
+        if not out:
+            # A reading with no telemetry (e.g. host hardware stats) must not
+            # consume channels: later readings would shift for every client.
+            return b"", channel
+        return bytes(out), channel + cls.TELEM_CHANNEL_STRIDE
+
+    @classmethod
+    def _encode_power_group(cls, channel: int, reading) -> bytes:
+        """Power group: bus voltage, current and power for one rail."""
+        return cls._encode_power_reading(channel, reading)
+
+    @staticmethod
+    def _encode_supply_group(channel: int, reading) -> bytes:
+        """Supply group: supply/array voltage and battery percent.
+
+        Kept off the power channel because that channel already carries a
+        voltage: two LPP_VOLTAGE entries on one channel is a decoder hazard,
+        whereas the same type on two channels is unambiguous.
+        """
+        if not reading.get("ok"):
+            return b""
+        data = reading.get("data") or {}
+        out = bytearray()
+        supply = data.get("supply_voltage_v")
+        if supply is not None:
+            try:
+                out.extend(encode_voltage(channel, float(supply)))
+            except (TypeError, ValueError):
+                pass
+        battery = data.get("battery_percent")
+        if battery is not None:
+            try:
+                out.extend(encode_percentage(channel, float(battery)))
+            except (TypeError, ValueError):
+                pass
+        return bytes(out)
+
+    @staticmethod
+    def _encode_wind_group(channel: int, reading) -> bytes:
+        """Wind group: bearing only (speed has no LPP type)."""
+        if not reading.get("ok"):
+            return b""
+        direction = (reading.get("data") or {}).get("wind_dir_deg")
+        if direction is None:
+            return b""
+        try:
+            return encode_direction(channel, float(direction))
+        except (TypeError, ValueError):
+            return b""
+
+    @staticmethod
+    def _encode_solar_group(channel: int, reading) -> bytes:
+        """Solar group: illuminance in lux.
+
+        Only a sensor that actually measures illuminance is encoded. Irradiance
+        (W/m2, what most weather stations report) is a different quantity: sending
+        it in the lux field is off by ~100x and mislabels the reading, so it stays
+        in the reading dict for the web UI/MQTT instead.
+        """
+        if not reading.get("ok"):
+            return b""
+        lux = (reading.get("data") or {}).get("illuminance_lux")
+        if lux is None:
+            return b""
+        try:
+            return encode_luminosity(channel, float(lux))
+        except (TypeError, ValueError):
+            return b""
 
     def _make_handle_get_access_list(self, identity_acl):
         """Create a closure for GET_ACCESS_LIST bound to a specific identity ACL."""

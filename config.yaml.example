@@ -267,6 +267,20 @@ sensors:
       name: system-health
       enabled: true
 
+    # Ecowitt / Fine Offset weather-station gateway over its local HTTP API
+    # (GW1000/GW1100/GW2000/GW3000 class). No cloud account needed: the gateway
+    # serves JSON at /get_livedata_info?cmd=get_livedata_info on its web port.
+    # Readings become telemetry on the node's channel map (temperature,
+    # humidity, pressure, wind direction, supply voltage, illuminance).
+    # - type: ecowitt
+    #   name: backyard-weather
+    #   enabled: true
+    #   settings:
+    #     host: 192.168.1.50      # gateway address (hostname or IP, IPv6 ok)
+    #     port: 80
+    #     poll_interval_seconds: 60.0
+    #     timeout_seconds: 5.0
+
     # Read-only Victron VE.Direct USB telemetry; see docs/victron_vedirect.md.
     # Standard dependency checks at initialization; auto-install disabled below.
     # Stop cat/other serial readers before enabling. Unique name per device.

@@ -1363,8 +1363,9 @@ def test_telemetry_base_voltage_from_ups_sensor():
 def test_telemetry_admin_full_mask_includes_environment_sensors():
     """Admin with full mask gets configured env sensors after the base entry.
 
-    The UPS reading has no temperature/humidity, so channel 2 is assigned to the
-    first environment sensor (firmware querySensors channel assignment).
+    Each reading owns TELEM_CHANNEL_STRIDE channels: the UPS reading fills its
+    power group on channel 2 and consumes the stride, so the environment reading
+    that follows starts five channels later and emits on its environment slot.
     """
     sm = _FakeSensorManager(
         [
@@ -1380,13 +1381,15 @@ def test_telemetry_admin_full_mask_includes_environment_sensors():
     # req_data[0] = 0x00 inverse mask -> perm_mask 0xFF (environment allowed).
     lpp = helper._handle_get_telemetry(admin, 0, b"\x00")
 
+    stride = ProtocolRequestHelper.TELEM_CHANNEL_STRIDE
+    env_channel = TELEM_CHANNEL_SELF + 1 + stride + ProtocolRequestHelper.TELEM_GROUP_ENVIRONMENT
     expected = (
         encode_voltage(TELEM_CHANNEL_SELF, 12.6)
         + encode_voltage(TELEM_CHANNEL_SELF + 1, 12.6)
         + encode_current(TELEM_CHANNEL_SELF + 1, 0.5)
         + encode_power(TELEM_CHANNEL_SELF + 1, 6)
-        + encode_temperature(TELEM_CHANNEL_SELF + 2, 21.5)
-        + encode_relative_humidity(TELEM_CHANNEL_SELF + 2, 55.0)
+        + encode_temperature(env_channel, 21.5)
+        + encode_relative_humidity(env_channel, 55.0)
     )
     assert lpp == expected
 
@@ -1430,7 +1433,7 @@ def test_telemetry_bme280_emits_temperature_humidity_and_pressure_on_one_channel
     """A BME280-shaped reading emits all three measured values on one channel.
 
     Mirrors the firmware's query_bme280 order: temperature, relative humidity,
-    then barometric pressure.
+    then barometric pressure - all in the environment group of the channel map.
     """
     sm = _FakeSensorManager([_reading(temperature_c=21.5, humidity_pct=55.0, pressure_hpa=1013.25)])
     helper = ProtocolRequestHelper(
@@ -1440,11 +1443,12 @@ def test_telemetry_bme280_emits_temperature_humidity_and_pressure_on_one_channel
 
     lpp = helper._handle_get_telemetry(admin, 0, b"\x00")
 
+    env_channel = TELEM_CHANNEL_SELF + 1 + ProtocolRequestHelper.TELEM_GROUP_ENVIRONMENT
     expected = (
         encode_voltage(TELEM_CHANNEL_SELF, 0.0)
-        + encode_temperature(TELEM_CHANNEL_SELF + 1, 21.5)
-        + encode_relative_humidity(TELEM_CHANNEL_SELF + 1, 55.0)
-        + encode_barometric_pressure(TELEM_CHANNEL_SELF + 1, 1013.25)
+        + encode_temperature(env_channel, 21.5)
+        + encode_relative_humidity(env_channel, 55.0)
+        + encode_barometric_pressure(env_channel, 1013.25)
     )
     assert lpp == expected
 
