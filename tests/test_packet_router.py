@@ -477,6 +477,24 @@ class TestInFlightCap(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(cancelled), 1, "Hanging task was not cancelled on shutdown")
 
+    async def test_idle_router_waits_on_queue_without_polling(self):
+        """An idle router blocks on the queue; it does not wake to re-check it."""
+        router = PacketRouter(_make_daemon())
+        gets = []
+        real_get = router.queue.get
+
+        def counting_get():
+            gets.append(1)
+            return real_get()
+
+        router.queue.get = counting_get
+
+        await router.start()
+        await asyncio.sleep(0.25)
+        await router.stop()
+
+        self.assertEqual(len(gets), 1)
+
     # ── 4. Route-tasks set stays in sync with counter ───────────────────────
 
     async def test_route_tasks_set_cleaned_up_on_completion(self):
