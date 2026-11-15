@@ -41,6 +41,7 @@ class CompanionFrameServer(_BaseFrameServer):
         control_handler=None,
         batt_getter: Callable[[], int] | None = None,
         storage_dir: str | None = None,
+        sensor_manager=None,
     ):
         super().__init__(
             bridge=bridge,
@@ -58,6 +59,46 @@ class CompanionFrameServer(_BaseFrameServer):
         self.sqlite_handler = sqlite_handler
         self.batt_getter = batt_getter
         self.storage_dir = storage_dir
+        self.sensor_manager = sensor_manager
+
+    def _get_self_telemetry_lpp(self) -> bytes:
+        """Append the node's own sensor readings to companion self-telemetry.
+
+        Base class returns b"" (voltage floor only), which is what a companion
+        push was limited to before. Reuses the repeater's CayenneLPP encoders so
+        a weather station plugged into the repeater also shows up in the app on
+        the companion contact, not just on the repeater identity.
+        """
+        manager = self.sensor_manager
+        if manager is None:
+            return b""
+        try:
+            readings = manager.get_summary().get("readings") or []
+        except Exception:  # never break the companion link over telemetry
+            logger.debug("sensor summary unavailable for self telemetry", exc_info=True)
+            return b""
+        # Imported lazily: the handler package imports this module's siblings.
+        from openhop_core.protocol.cayenne_lpp import TELEM_CHANNEL_SELF
+        from repeater.handler_helpers.protocol_request import ProtocolRequestHelper
+
+        out = bytearray()
+        channel = TELEM_CHANNEL_SELF + 1
+        stride = ProtocolRequestHelper.TELEM_CHANNEL_STRIDE
+        for reading in readings:
+            if channel + stride - 1 > 0xFF:
+                # Same bound as the repeater path: never let _add_field wrap the
+                # channel byte (it masks instead of raising).
+                logger.warning(
+                    "Companion telemetry channel space exhausted at %d; dropping remaining readings",
+                    channel,
+                )
+                break
+            # Same channel map the repeater identity uses, so a companion shows
+            # exactly what a telemetry request to the node would return.
+            entry, channel = ProtocolRequestHelper._encode_sensor_reading(channel, reading)
+            if entry:
+                out.extend(entry)
+        return bytes(out)
 
     def _get_batt_and_storage(self) -> tuple[int, int, int]:
         """Report battery millivolts and storage usage to companion clients.
