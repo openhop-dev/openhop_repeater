@@ -1,0 +1,8 @@
+[Unit]
+Description=Set openHop Repeater radio region (preset %i)
+
+[Service]
+Type=oneshot
+User=openhop
+Group=openhop
+ExecStart=/opt/openhop-cz/venv/bin/python /opt/openhop-cz/bin/make_config.py %i

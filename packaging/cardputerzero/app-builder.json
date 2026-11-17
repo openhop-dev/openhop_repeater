@@ -1,0 +1,31 @@
+{
+  "app_name": "openHop Repeater",
+  "package_name": "openhop-cz",
+  "bin_name": "openhop-cz",
+  "description": "openHop MeshCore repeater for CardputerZero + Cap LoRa-1262",
+
+  "store": {
+    "summary": "Turn your CardputerZero + Cap LoRa-1262 into a MeshCore repeater",
+    "description": "Runs the openHop Repeater daemon on the SX1262 radio in the Cap LoRa-1262. The on-device app starts and stops the repeater, picks your radio region, toggles start-at-boot and shows the address of the full web dashboard. The repeater is off until you start it, and runs as an unprivileged user. Requires the Cap LoRa-1262 with its antenna attached. While the repeater runs, the M5 LoRa and GPS apps cannot use the radio.",
+    "categories": ["Radio & Comms"],
+    "screenshots": [
+      "screenshots/main.png",
+      "screenshots/regions.png",
+      "screenshots/confirm.png"
+    ],
+    "icon": "assets/icon.png",
+    "license": "MIT",
+    "source_repo": "https://github.com/openhop-dev/openhop_repeater",
+    "author": { "display_name": "openHop" },
+    "share_code": "HOP1",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": true,
+      "additional_hardware": true,
+      "background_service": true,
+      "external_display": false
+    }
+  }
+}

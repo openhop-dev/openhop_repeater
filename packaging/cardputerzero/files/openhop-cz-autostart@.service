@@ -1,0 +1,8 @@
+[Unit]
+Description=Turn openHop Repeater start-at-boot %i
+
+[Service]
+Type=oneshot
+User=openhop
+Group=openhop
+ExecStart=/opt/openhop-cz/bin/autostart %i

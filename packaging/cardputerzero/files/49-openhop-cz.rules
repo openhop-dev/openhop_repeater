@@ -1,0 +1,9 @@
+// Let the on-device openHop app start, stop and configure the openHop
+// repeater units without a password. Scoped to these units only.
+polkit.addRule(function(action, subject) {
+    if (action.id != "org.freedesktop.systemd1.manage-units") return;
+    var unit = action.lookup("unit");
+    if (!unit) return;
+    if (!/^openhop-cz(-setup@[0-9]+|-autostart@(on|off))?\.service$/.test(unit)) return;
+    if (subject.user == "openhop" || subject.isInGroup("gpio")) return polkit.Result.YES;
+});

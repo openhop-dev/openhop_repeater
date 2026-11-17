@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=openHop
+Exec=/usr/share/APPLaunch/bin/openhop-cz
+Terminal=false
+Icon=share/images/openhop-cz.png
+Type=Application
