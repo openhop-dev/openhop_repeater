@@ -1,0 +1,158 @@
+name: CardputerZero Package
+
+# Builds openhop-cz, the .deb for the M5Stack CardputerZero app store, and on a
+# release attaches it to the release and (once configured) submits it to the
+# store. See packaging/cardputerzero/PUBLISHING.md.
+
+on:
+  pull_request:
+    paths:
+      - "packaging/cardputerzero/**"
+      - "radio-settings.json"
+      - "radio-presets.json"
+      - "config.yaml.example"
+      - "pyproject.toml"
+      - ".github/workflows/cardputerzero-package.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Debian revision appended to the openHop version"
+        required: false
+        default: "1"
+      publish_to_store:
+        description: "Submit the package to the CardputerZero store"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: cardputerzero-package-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # CardputerZero/AppBuilder commit whose czdev submits to the store.
+  APPBUILDER_REF: 18996b694ae305306fc5d457d982cfba0b0e7cc5
+
+jobs:
+  build:
+    name: Build .deb (arm64, Debian trixie)
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The package version comes from the git tags.
+          fetch-depth: 0
+
+      - name: Build package
+        env:
+          REVISION: ${{ inputs.revision || '1' }}
+          MAINTAINER: ${{ vars.CARDPUTERZERO_MAINTAINER }}
+        run: |
+          docker run --rm -e REVISION -e MAINTAINER -v "$PWD:/src" -w /src debian:trixie \
+            sh -c 'packaging/cardputerzero/ci-deps.sh && packaging/cardputerzero/build_deb.sh'
+
+      - name: Install and smoke-test in a clean container
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src debian:trixie \
+            packaging/cardputerzero/smoke_test.sh
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: openhop-cz-deb
+          path: packaging/cardputerzero/build/*.deb
+          if-no-files-found: error
+
+  release-asset:
+    name: Attach to the GitHub release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: openhop-cz-deb
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" ./*.deb --clobber --repo "$GITHUB_REPOSITORY"
+
+  store:
+    name: Submit to the CardputerZero store
+    if: >-
+      (github.event_name == 'release' && !github.event.release.prerelease &&
+       vars.CARDPUTERZERO_STORE_PUBLISH == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_to_store)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: cardputerzero-store
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout the store tool
+        uses: actions/checkout@v4
+        with:
+          repository: CardputerZero/AppBuilder
+          ref: ${{ env.APPBUILDER_REF }}
+          path: appbuilder
+          persist-credentials: false
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: openhop-cz-deb
+          path: packaging/cardputerzero/build
+
+      - name: Publish
+        env:
+          CZDEV_GITHUB_TOKEN: ${{ secrets.CZDEV_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          deb=$(ls packaging/cardputerzero/build/*.deb)
+          version=$(dpkg-deb -f "$deb" Version)
+          case "$version" in
+            *~dev*)
+              echo "::error::$version is a development build; only tagged releases go to the store."
+              exit 1
+              ;;
+          esac
+          if [ -z "$CZDEV_GITHUB_TOKEN" ]; then
+            echo "::error::Secret CZDEV_GITHUB_TOKEN is not set in the cardputerzero-store environment."
+            exit 1
+          fi
+
+          # czdev reads the login that `czdev login` would have saved, and
+          # pushes over SSH; give it the token for both.
+          login=$(curl -fsS -H "Authorization: Bearer $CZDEV_GITHUB_TOKEN" \
+            https://api.github.com/user | jq -r .login)
+          (
+            umask 077
+            mkdir -p "$HOME/.czdev"
+            jq -n --arg token "$CZDEV_GITHUB_TOKEN" --arg user "$login" \
+              '{github_token: $token, github_username: $user}' > "$HOME/.czdev/credentials"
+          )
+          git config --global user.name "$login"
+          git config --global user.email "$login@users.noreply.github.com"
+          git config --global \
+            url."https://x-access-token:${CZDEV_GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+          cd packaging/cardputerzero
+          "$GITHUB_WORKSPACE/appbuilder/czdev" publish --deb "build/$(basename "$deb")"

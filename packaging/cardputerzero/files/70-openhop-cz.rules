@@ -1,0 +1,2 @@
+# Let the gpio group switch the Cap 5V rail (same policy as the CardputerZero BSP).
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="ext_5v_out", RUN+="/bin/chgrp gpio /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

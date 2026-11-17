@@ -440,6 +440,25 @@
       "dio3_tcxo_voltage": 1.8,
       "preamble_length": 32
     },
+    "cardputerzero-cap-lora-1262": {
+      "name": "M5Stack CardputerZero + Cap LoRa-1262",
+      "description": "SX1262 on the Cap bus (SPI0 CE1). The Cap's 5V rail and antenna switch (I/O expander at I2C 0x43) must be switched on before the radio starts; the openhop-cz package does this, see packaging/cardputerzero.",
+      "bus_id": 0,
+      "cs_id": 1,
+      "cs_pin": -1,
+      "reset_pin": 26,
+      "busy_pin": 22,
+      "irq_pin": 23,
+      "txen_pin": -1,
+      "rxen_pin": -1,
+      "txled_pin": -1,
+      "rxled_pin": -1,
+      "tx_power": 22,
+      "use_dio2_rf": true,
+      "use_dio3_tcxo": true,
+      "dio3_tcxo_voltage": 3.0,
+      "preamble_length": 32
+    },
     "modem_usb": {
       "name": "openHop Modem (USB-CDC)",
       "description": "ESP32-S3 / nRF52 openHop Modem connected over USB-CDC. Pick this if the modem is plugged into the host's USB port (e.g. /dev/ttyACM0). Edit the 'modem_usb' section after first-run to point at the right serial device.",

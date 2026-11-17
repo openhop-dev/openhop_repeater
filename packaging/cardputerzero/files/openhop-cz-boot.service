@@ -1,0 +1,14 @@
+[Unit]
+Description=Start openHop Repeater at boot when enabled in the openHop app
+After=multi-user.target
+ConditionPathExists=/etc/openhop-cz/autostart
+ConditionPathExists=/etc/openhop-cz/config.yaml
+
+[Service]
+Type=oneshot
+User=openhop
+Group=openhop
+ExecStart=/usr/bin/systemctl --no-block start openhop-cz.service
+
+[Install]
+WantedBy=multi-user.target

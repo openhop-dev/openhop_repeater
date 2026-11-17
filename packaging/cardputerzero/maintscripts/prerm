@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ]; then
+    if [ "$1" = "upgrade" ] && systemctl is-active --quiet openhop-cz.service; then
+        : > /run/openhop-cz.was-running
+    fi
+    systemctl stop openhop-cz.service >/dev/null 2>&1 || true
+    if [ "$1" = "remove" ]; then
+        systemctl disable openhop-cz-boot.service >/dev/null 2>&1 || true
+    fi
+fi
+find /opt/openhop-cz -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+exit 0
