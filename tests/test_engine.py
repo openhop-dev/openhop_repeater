@@ -3043,6 +3043,38 @@ class TestEngineRecordAndCleanupHelpers:
         handler._append_recent_packet({"timestamp": time.time()})
         assert dict(handler._recent_hash_index) == base_index
 
+    @pytest.mark.asyncio
+    async def test_relayed_packet_is_charted_as_heard_on_a_single_radio(self, tmp_path):
+        """Core names no ingress radio on a plain radio; the charts need one to count the RX."""
+        from repeater.config import build_radio_profiles
+        from repeater.data_acquisition.sqlite_handler import SQLiteHandler
+        from repeater.engine import RepeaterHandler
+
+        config = _make_config(radio_type="sx1262", radio={"frequency": 869618000})
+        with (
+            patch("repeater.engine.StorageCollector"),
+            patch("repeater.engine.RepeaterHandler._start_background_tasks"),
+        ):
+            handler = RepeaterHandler(
+                config, _make_dispatcher(), LOCAL_HASH, local_hash_bytes=bytes([LOCAL_HASH])
+            )
+        storage = SQLiteHandler(tmp_path)
+
+        relayed = _make_flood_packet(payload=bytes(40), path=bytes(3))
+        originated = _make_flood_packet(payload=bytes(range(40)))
+        with patch("repeater.engine.asyncio.sleep", new_callable=AsyncMock):
+            await handler(relayed, {"snr": 7.5, "rssi": -90})
+            storage.store_packet(handler.storage.record_packet.call_args.args[0])
+            await handler(originated, {}, local_transmission=True)
+            storage.store_packet(handler.storage.record_packet.call_args.args[0])
+
+        chart = storage.get_airtime_buckets(
+            0, time.time() + 60, radio_profiles=build_radio_profiles(config)
+        )
+        # One reception and two transmissions: the relay was heard, then sent;
+        # the packet this node originated was only sent.
+        assert (chart["rx_total"], chart["tx_total"]) == (1, 2)
+
     def test_cleanup_handles_storage_close_exception(self, handler):
         fake_task = MagicMock()
         fake_task.done.return_value = False
