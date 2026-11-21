@@ -134,6 +134,12 @@ class PluginRuntime:
                 self._runtime_state[plugin_id] = (
                     PluginState.DISABLED if not enabled else PluginState.STOPPED
                 )
+            running = plugin_id in self._handles
+
+        # An install does not stop the plugin, so a running one may still be
+        # executing from another release. Otherwise only this one is read.
+        if not running:
+            self.storage.prune_releases(plugin_id, version)
 
         return {
             "id": plugin_id,

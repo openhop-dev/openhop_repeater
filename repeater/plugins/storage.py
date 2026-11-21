@@ -238,6 +238,17 @@ class PluginStorage:
         self._atomic_write_json(dest, manifest.to_dict())
         return dest
 
+    def prune_releases(self, plugin_id: str, keep: str) -> None:
+        """Remove every release directory except ``keep``."""
+        try:
+            entries = list(self.paths_for(plugin_id).releases_dir.iterdir())
+        except OSError as exc:
+            logger.debug("release listing failed for %s: %s", plugin_id, exc)
+            return
+        for entry in entries:
+            if entry.name != keep:
+                shutil.rmtree(entry, ignore_errors=True)
+
     def remove_release_code(self, plugin_id: str, keep_data: bool = True) -> None:
         paths = self.paths_for(plugin_id)
         if paths.current_link.exists() or paths.current_link.is_symlink():

@@ -115,6 +115,49 @@ def test_install_creates_layout_and_isolated_venv(tmp_path: Path, monkeypatch):
             assert str(paths.venv_dir("0.1.0")) in c[0] or "venv" in "".join(c)
 
 
+def test_install_removes_other_releases_unless_the_plugin_runs(tmp_path: Path):
+    storage = PluginStorage(tmp_path / "plugins")
+
+    def fake_run(cmd, **kwargs):
+        if "venv" in cmd:
+            venv = Path(cmd[-1])
+            (venv / "bin").mkdir(parents=True, exist_ok=True)
+            (venv / "bin" / "python").write_text("x")
+            (venv / "bin" / "python").chmod(0o755)
+        if "pip" in cmd:
+            Path(cmd[0]).parent.joinpath("demo-cli").write_text("x")
+            Path(cmd[0]).parent.joinpath("demo-cli").chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    runtime = PluginRuntime(storage, run_factory=fake_run, popen_factory=lambda *a, **k: FakeProc())
+    manager = PluginManager(storage, runtime)
+    paths = storage.paths_for("openhop.demo")
+
+    def install(version: str) -> None:
+        wheel = tmp_path / f"demo-{version}-py3-none-any.whl"
+        _make_wheel(
+            wheel,
+            {
+                "schema": 1,
+                "id": "openhop.demo",
+                "name": "Demo",
+                "version": version,
+                "runtime": {"type": "python", "entrypoint": "demo-cli"},
+            },
+        )
+        manager.install(wheel)
+
+    install("0.1.0")
+    manager.enable("openhop.demo")
+    install("0.2.0")
+    install("0.3.0")
+    assert sorted(p.name for p in paths.releases_dir.iterdir()) == ["0.1.0", "0.2.0", "0.3.0"]
+
+    manager.stop_plugin("openhop.demo")
+    install("0.4.0")
+    assert [p.name for p in paths.releases_dir.iterdir()] == ["0.4.0"]
+
+
 def test_start_rebuilds_incompatible_persisted_venv_from_archived_wheel(tmp_path: Path):
     storage = PluginStorage(tmp_path / "plugins")
     plugin_id = "openhop.demo"
