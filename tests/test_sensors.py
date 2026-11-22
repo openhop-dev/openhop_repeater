@@ -9,6 +9,7 @@ import pytest
 
 from repeater.sensors import SensorBase, SensorManager, SensorRegistry
 from repeater.sensors import bme280 as bme280_module
+from repeater.sensors import bme680 as bme680_module
 from repeater.sensors import ens210 as ens210_module
 from repeater.sensors import ina219 as ina219_module
 from repeater.sensors import lafvin_ups_3s as lafvin_ups_3s_module
@@ -16,6 +17,7 @@ from repeater.sensors import shtc3 as shtc3_module
 from repeater.sensors import waveshare_ups_d as waveshare_ups_d_module
 from repeater.sensors import waveshare_ups_e as waveshare_ups_e_module
 from repeater.sensors.bme280 import BME280Sensor
+from repeater.sensors.bme680 import BME680Sensor
 from repeater.sensors.ens210 import ENS210Sensor
 from repeater.sensors.ina219 import INA219Sensor
 from repeater.sensors.lafvin_ups_3s import LafvinUps3sSensor
@@ -629,3 +631,139 @@ def test_lafvin_sensor_read_wraps_bus_failures(monkeypatch):
     reading = LafvinUps3sSensor("battery").read()
     assert reading["ok"] is False
     assert "LAFVIN UPS 3S read failed" in reading["error"]
+
+
+# Calibration and one measurement captured from a real BME680 (chip id 0x61) on a
+# Raspberry Pi 5 HAT indoors at ~21.8 degC / 1008 hPa / 40 %RH, gas heater stable.
+_BME680_COEFF1 = list(bytes.fromhex("0005680300DE8C42D75800D71A9BFF211E0000E7F91EF41E93"))
+_BME680_COEFF2 = list(bytes.fromhex("3E5A34002D14789CC166F4C2D112CB00"))
+_BME680_HEAT = {0x00: 0x2D, 0x02: 0x16, 0x04: 0xF3}
+_BME680_FIELD0 = list(bytes.fromhex("00005659C077870054878000007A79"))
+
+
+def _make_fake_bme680_bus(chip_id=0x61, measuring_reads=0, field0=None, writes=None):
+    data = list(field0 or _BME680_FIELD0)
+
+    class _Bus:
+        def __init__(self, bus_number):
+            self.bus_number = bus_number
+            self._remaining_measuring = measuring_reads
+
+        def read_byte_data(self, addr, register):
+            if register == bme680_module._REG_ID:
+                return chip_id
+            if register in _BME680_HEAT:
+                return _BME680_HEAT[register]
+            if register == bme680_module._REG_FIELD0:
+                if self._remaining_measuring > 0:
+                    self._remaining_measuring -= 1
+                    return 0x20  # measuring, no new data yet
+                return bme680_module._NEW_DATA
+            raise AssertionError(f"unexpected register: {register}")
+
+        def write_byte_data(self, addr, register, value):
+            if writes is not None:
+                writes.append((register, value))
+
+        def read_i2c_block_data(self, addr, register, length):
+            if register == bme680_module._REG_COEFF1:
+                return list(_BME680_COEFF1)
+            if register == bme680_module._REG_COEFF2:
+                return list(_BME680_COEFF2)
+            if register == bme680_module._REG_FIELD0:
+                return list(data)
+            raise AssertionError(f"unexpected register: {register}")
+
+        def close(self):
+            return None
+
+    return _Bus
+
+
+def test_bme680_sensor_reads_temperature_pressure_humidity_and_gas(monkeypatch):
+    writes = []
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus(measuring_reads=3, writes=writes))
+    monkeypatch.setattr(bme680_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    reading = BME680Sensor("env").read()
+
+    assert reading["ok"] is True
+    assert reading["data"] == {
+        "temperature_c": 21.81,
+        "humidity_pct": 40.13,
+        "pressure_hpa": 1007.97,
+        "gas_resistance_ohm": 15899,
+    }
+    # Heater profile 0 is programmed and the forced measurement is triggered last.
+    assert bme680_module._REG_RES_HEAT_0 in [register for register, _ in writes]
+    assert (bme680_module._REG_CTRL_GAS_1, 0x10) in writes
+    assert writes[-1][0] == bme680_module._REG_CTRL_MEAS
+    assert writes[-1][1] & 0x03 == bme680_module._MODE_FORCED
+
+
+def test_bme680_sensor_accepts_text_settings_from_web_form(monkeypatch):
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus())
+
+    sensor = BME680Sensor(
+        "env", {"settings": {"i2c_address": "0x77", "bus_number": "1", "gas": "0"}}
+    )
+
+    assert sensor.i2c_address == 0x77
+    assert sensor.bus_number == 1
+    assert sensor.gas is False
+
+
+def test_bme680_sensor_without_gas_turns_heater_off(monkeypatch):
+    writes = []
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus(writes=writes))
+    monkeypatch.setattr(bme680_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    reading = BME680Sensor("env", {"settings": {"gas": False}}).read()
+
+    assert reading["ok"] is True
+    assert "gas_resistance_ohm" not in reading["data"]
+    assert (bme680_module._REG_CTRL_GAS_0, 0x08) in writes
+
+
+def test_bme680_sensor_omits_gas_when_heater_not_stable(monkeypatch):
+    field0 = list(_BME680_FIELD0)
+    field0[14] &= ~bme680_module._HEAT_STAB
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus(field0=field0))
+    monkeypatch.setattr(bme680_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    reading = BME680Sensor("env").read()
+
+    assert reading["ok"] is True
+    assert "gas_resistance_ohm" not in reading["data"]
+    assert reading["data"]["pressure_hpa"] == 1007.97
+
+
+def test_bme680_sensor_rejects_bme280_chip_id(monkeypatch):
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus(chip_id=0x60))
+
+    sensor = BME680Sensor("env")
+
+    assert sensor.available is False
+    reading = sensor.read()
+    assert reading["ok"] is False
+    assert "not available" in reading["error"]
+
+
+def test_bme680_sensor_read_times_out_when_measurement_never_completes(monkeypatch):
+    _install_fake_smbus2(monkeypatch, _make_fake_bme680_bus(measuring_reads=10**6))
+    monkeypatch.setattr(bme680_module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    reading = BME680Sensor("env", {"settings": {"read_timeout_seconds": 0.05, "gas": False}}).read()
+
+    assert reading["ok"] is False
+    assert "timed out" in reading["error"]
+
+
+def test_bme680_heater_and_wait_codes():
+    calibration = bme680_module.parse_calibration(
+        _BME680_COEFF1, _BME680_COEFF2, _BME680_HEAT[0x00], _BME680_HEAT[0x02], _BME680_HEAT[0x04]
+    )
+    assert calibration["range_sw_err"] == -1
+    assert 0 < bme680_module.heater_code(calibration, 320, 25) < 256
+    assert bme680_module.wait_code(150) == 0x65  # 37 x 4 ms
+    assert bme680_module.wait_code(40) == 40

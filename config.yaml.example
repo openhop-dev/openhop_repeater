@@ -317,6 +317,18 @@ sensors:
     #     i2c_address: 0x76     # 0x77 when SDO is tied high
     #     bus_number: 1         # I2C bus number (1 for Raspberry Pi default)
 
+    # Example BME680 temperature/pressure/humidity/gas sensor (commented out by default)
+    # - type: bme680
+    #   name: env
+    #   enabled: true
+    #   auto_install_packages: false
+    #   settings:
+    #     i2c_address: 0x76     # 0x77 when SDO is tied high
+    #     bus_number: 1         # I2C bus number (1 for Raspberry Pi default)
+    #     gas: true             # heat the gas plate each reading (raw resistance, not IAQ)
+    #     heater_temp_c: 320
+    #     heater_ms: 150
+
     # Example Waveshare UPS D Hat 
     # - type: waveshare_ups_d
     #   name: battery
