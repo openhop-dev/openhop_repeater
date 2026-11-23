@@ -693,9 +693,13 @@ def _packet_stats_by_radio(groups, resolver: RadioResolver) -> Tuple[dict, dict]
 
 
 class SQLiteHandler:
-    def __init__(self, storage_dir: Path):
+    def __init__(self, storage_dir: Path, volatile_dir: Optional[Path] = None):
         self.storage_dir = storage_dir
         self.sqlite_path = self.storage_dir / "repeater.db"
+        # volatile_dir lets the volatile database live elsewhere (e.g. tmpfs) than storage_dir.
+        self.volatile_dir = Path(volatile_dir) if volatile_dir else self.storage_dir
+        self.volatile_dir.mkdir(parents=True, exist_ok=True)
+        self.volatile_path = self.volatile_dir / "repeater-volatile.db"
         self._api_token_last_used_updates = {}
         self._api_token_last_used_interval_sec = 300
         self._hot_cache_ttl_sec = 60

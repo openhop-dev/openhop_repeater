@@ -778,6 +778,12 @@ storage:
   # Use a writable path for local/dev (e.g. "./var/openhop_repeater" or "~/var/openhop_repeater").
   storage_dir: "/var/lib/openhop_repeater"
 
+  # Optional: directory for repeater-volatile.db (SQLite). Defaults to storage_dir.
+  # Point it to a tmpfs (e.g. "/dev/shm/openhop_repeater") to avoid SD-card writes.
+  # This database stores statistics and packets, it is lost at reboot.
+  # repeater.db (tokens, ACL, contacts...), plugins, config and RRD stay in storage_dir.
+  # volatile_dir: "/dev/shm/openhop_repeater"
+
   # Data retention settings
   retention:
     # Clean up SQLite records older than this many days

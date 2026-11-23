@@ -213,6 +213,31 @@ def resolve_storage_dir(
     return storage_dir
 
 
+def resolve_volatile_dir(
+    config: Dict[str, Any],
+    *,
+    config_path: Optional[str] = None,
+) -> Path:
+    """Directory holding ``repeater-volatile.db``: ``storage.volatile_dir`` if set, else ``storage_dir``.
+
+    Lets the volatile data (packets, stats) live on a tmpfs (e.g. ``/dev/shm``) while
+    ``repeater.db``, plugins, config and RRD stay in ``storage_dir``.
+    """
+    volatile_dir_cfg = config.get("storage", {}).get("volatile_dir")
+    if not volatile_dir_cfg:
+        return resolve_storage_dir(config, config_path=config_path)
+
+    volatile_dir = Path(str(volatile_dir_cfg)).expanduser()
+    if not volatile_dir.is_absolute():
+        if config_path:
+            base_dir = Path(config_path).expanduser().resolve().parent
+            volatile_dir = (base_dir / volatile_dir).resolve()
+        else:
+            volatile_dir = volatile_dir.resolve()
+
+    return volatile_dir
+
+
 def format_radio_config_str(frequency_hz, bandwidth_hz, spreading_factor, coding_rate) -> str:
     """Air settings as the MC2MQTT status ``radio`` string: MHz,kHz,SF,CR."""
     return f"{frequency_hz / 1_000_000},{bandwidth_hz / 1_000},{spreading_factor},{coding_rate}"
@@ -280,6 +305,10 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if "storage" not in config or not isinstance(config.get("storage"), dict):
         config["storage"] = {}
     config["storage"]["storage_dir"] = str(storage_dir)
+    if config["storage"].get("volatile_dir"):
+        config["storage"]["volatile_dir"] = str(
+            resolve_volatile_dir(config, config_path=config_path)
+        )
 
     if config.get("storage_dir"):
         logger.warning(

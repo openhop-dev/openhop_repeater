@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from repeater.config import build_radio_profiles, resolve_storage_dir
+from repeater.config import build_radio_profiles, resolve_storage_dir, resolve_volatile_dir
 
 from .mqtt_handler import MeshCoreToMqttPusher
 from .network_usage import NetworkUsageCollector
@@ -72,7 +72,9 @@ class StorageCollector:
         self.storage_dir = resolve_storage_dir(config)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        self.sqlite_handler = SQLiteHandler(self.storage_dir)
+        self.sqlite_handler = SQLiteHandler(
+            self.storage_dir, volatile_dir=resolve_volatile_dir(config)
+        )
         self.network_usage = NetworkUsageCollector(self.sqlite_handler)
         self.network_usage.start()
         self.rrd_handler = None
