@@ -19,6 +19,10 @@ class RRDToolHandler:
         self.rrd_path = self.storage_dir / "metrics.rrd"
         self.available = RRDTOOL_AVAILABLE
         self._init_rrd()
+        # Running totals behind the COUNTER data sources. rrdtool reads a value
+        # lower than the one before it as a counter wrap, so these only rise,
+        # and they start from the file's last values so a restart leaves no step.
+        self._totals = self._load_totals()
         # Timestamp of the last successful rrdtool.update() call (unix seconds,
         # aligned to the 60-second RRD step).  Used to skip writes whose period
         # has already been committed — no rrdtool.info() call needed.
@@ -80,7 +84,23 @@ class RRDToolHandler:
         except Exception as e:
             logger.error(f"Failed to create RRD database: {e}")
 
-    def update_packet_metrics(self, record: dict, cumulative_counts: dict):
+    def _load_totals(self) -> dict:
+        totals = {"rx_count": 0, "tx_count": 0, "drop_count": 0, "type_other": 0}
+        totals.update({f"type_{i}": 0 for i in range(16)})
+        if not self.available or not self.rrd_path.exists():
+            return totals
+
+        try:
+            last = rrdtool.lastupdate(str(self.rrd_path))["ds"]
+            for name in totals:
+                if last.get(name) is not None:
+                    totals[name] = int(last[name])
+        except Exception as e:
+            logger.error(f"Failed to read RRD packet counters: {e}")
+
+        return totals
+
+    def update_packet_metrics(self, record: dict):
         """Write packet metrics to RRD, throttled to once per 60-second step.
 
         RRD enforces a 60-second minimum step between updates.  We track the
@@ -91,22 +111,28 @@ class RRDToolHandler:
             return
 
         try:
+            # Count before the skip below: a packet that gets no write of its
+            # own still has to show in the next one.
+            pkt_type = int(record.get("type", 0))
+            self._totals["rx_count"] += 1
+            self._totals["tx_count" if record.get("transmitted") else "drop_count"] += 1
+            self._totals[f"type_{pkt_type}" if 0 <= pkt_type <= 15 else "type_other"] += 1
+
             timestamp = int(record.get("timestamp", time.time()))
 
             # Skip if this packet falls in the same 60-second period we already wrote.
             if timestamp <= self._last_rrd_update:
                 return
 
-            # Build update string from cumulative counts
-            rx_total = cumulative_counts.get("rx_total", 0)
-            tx_total = cumulative_counts.get("tx_total", 0)
-            drop_total = cumulative_counts.get("drop_total", 0)
-            type_counts = cumulative_counts.get("type_counts", {})
+            # Build update string from the running totals
+            rx_total = self._totals["rx_count"]
+            tx_total = self._totals["tx_count"]
+            drop_total = self._totals["drop_count"]
 
             type_values = []
             for i in range(16):
-                type_values.append(str(type_counts.get(f"type_{i}", 0)))
-            type_values.append(str(type_counts.get("type_other", 0)))
+                type_values.append(str(self._totals[f"type_{i}"]))
+            type_values.append(str(self._totals["type_other"]))
 
             rssi = record.get("rssi")
             snr = record.get("snr")

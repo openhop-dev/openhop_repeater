@@ -217,14 +217,24 @@ def test_record_packet_skips_rrd_work_when_disabled():
     collector.rrd_enabled = False
     collector.rrd_handler = None
     collector.sqlite_handler.store_packet.return_value = 123
-    collector.sqlite_handler.get_cumulative_counts = MagicMock()
     collector._publish_packet_sync = MagicMock()
 
     collector._record_packet_blocking({"type": 1, "transmitted": False}, skip_mqtt=False)
 
     collector.sqlite_handler.store_packet.assert_called_once()
-    collector.sqlite_handler.get_cumulative_counts.assert_not_called()
     collector._publish_packet_sync.assert_called_once()
+
+
+def test_record_packet_gives_rrd_the_record_alone():
+    collector = _make_collector()
+    collector.rrd_handler = MagicMock()
+    collector.sqlite_handler.store_packet.return_value = 123
+    collector._publish_packet_sync = MagicMock()
+    record = {"type": 1, "transmitted": False}
+
+    collector._record_packet_blocking(record, skip_mqtt=False)
+
+    collector.rrd_handler.update_packet_metrics.assert_called_once_with(record)
 
 
 def test_requested_but_unavailable_rrd_falls_back_to_sqlite():
