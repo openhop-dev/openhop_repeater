@@ -1573,7 +1573,7 @@ def test_daemon_state_survives_a_corrupt_row(tmp_path):
 
     handler = SQLiteHandler(tmp_path)
     handler.set_daemon_state(STATE_KEY, {"last_success_at": 1.0})
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         conn.execute("UPDATE daemon_state SET value_json = ?", ("{not json",))
         conn.commit()
 

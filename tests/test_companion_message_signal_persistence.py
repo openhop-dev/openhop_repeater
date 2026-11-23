@@ -192,7 +192,7 @@ def test_legacy_schema_migrates_and_defaults(tmp_path):
     # but no snr/rssi/channel_data_type/channel_data_payload) and drop the
     # migration marker, then re-run migrations against a pre-existing row.
     h = _handler(tmp_path)
-    conn = sqlite3.connect(str(h.sqlite_path))
+    conn = sqlite3.connect(str(h.volatile_path))
     conn.execute(
         "DELETE FROM migrations "
         "WHERE migration_name = 'add_signal_and_channel_data_to_companion_messages'"
@@ -227,7 +227,7 @@ def test_legacy_schema_migrates_and_defaults(tmp_path):
     h2 = _handler(tmp_path)  # re-runs migrations
 
     # (a) the four columns are added.
-    conn = sqlite3.connect(str(h2.sqlite_path))
+    conn = sqlite3.connect(str(h2.volatile_path))
     columns = {row[1] for row in conn.execute("PRAGMA table_info(companion_messages)")}
     conn.close()
     assert {"snr", "rssi", "channel_data_type", "channel_data_payload"} <= columns

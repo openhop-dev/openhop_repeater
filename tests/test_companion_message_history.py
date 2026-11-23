@@ -393,7 +393,7 @@ async def test_cli_traffic_stays_out_of_the_history(db):
 
 def _lock_writes(db):
     """Hold SQLite's write lock from another connection."""
-    lock = sqlite3.connect(db.sqlite_path, isolation_level=None)
+    lock = sqlite3.connect(db.volatile_path, isolation_level=None)
     lock.execute("BEGIN IMMEDIATE")
     return lock
 

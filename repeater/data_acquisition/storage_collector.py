@@ -836,7 +836,7 @@ class StorageCollector:
         try:
             import sqlite3
 
-            with sqlite3.connect(self.sqlite_handler.sqlite_path) as conn:
+            with sqlite3.connect(self.sqlite_handler.volatile_path) as conn:
                 result = conn.execute(
                     "SELECT node_name FROM adverts WHERE pubkey = ? AND node_name IS NOT NULL ORDER BY last_seen DESC LIMIT 1",
                     (pubkey,),

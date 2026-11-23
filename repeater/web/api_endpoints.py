@@ -9537,9 +9537,9 @@ class APIEndpoints:
         try:
             self._require_post()
             storage = self._get_storage()
-            size_before = storage.sqlite_handler.sqlite_path.stat().st_size
+            size_before = storage.sqlite_handler.database_size_bytes()
             storage.sqlite_handler.vacuum()
-            size_after = storage.sqlite_handler.sqlite_path.stat().st_size
+            size_after = storage.sqlite_handler.database_size_bytes()
             return {
                 "success": True,
                 "data": {

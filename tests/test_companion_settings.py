@@ -414,7 +414,7 @@ class TestSenderPrefixPersistence:
         # Build a current DB, then rewind companion_messages to the
         # pre-sender_prefix schema and drop the migration marker.
         h = self._handler(tmp_path)
-        conn = sqlite3.connect(str(h.sqlite_path))
+        conn = sqlite3.connect(str(h.volatile_path))
         conn.execute(
             "DELETE FROM migrations "
             "WHERE migration_name IN ("

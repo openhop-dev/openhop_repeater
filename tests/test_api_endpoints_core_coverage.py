@@ -1392,18 +1392,16 @@ def test_db_vacuum_options_success_and_error(cherrypy_ctx):
     assert api.db_vacuum() == ""
 
     request.method = "POST"
-    stat_values = [SimpleNamespace(st_size=1000), SimpleNamespace(st_size=700)]
-    sqlite_path = SimpleNamespace(stat=MagicMock(side_effect=stat_values))
-    sqlite_handler = SimpleNamespace(sqlite_path=sqlite_path, vacuum=MagicMock())
+    sqlite_handler = SimpleNamespace(
+        database_size_bytes=MagicMock(side_effect=[1000, 700]), vacuum=MagicMock()
+    )
     _attach_storage(api, SimpleNamespace(sqlite_handler=sqlite_handler))
 
     result = api.db_vacuum()
     assert result["success"] is True
     assert result["data"] == {"size_before": 1000, "size_after": 700, "freed_bytes": 300}
 
-    sqlite_path.stat = MagicMock(
-        side_effect=[SimpleNamespace(st_size=700), SimpleNamespace(st_size=700)]
-    )
+    sqlite_handler.database_size_bytes = MagicMock(side_effect=[700, 700])
     sqlite_handler.vacuum.side_effect = RuntimeError("vacuum failed")
     err = api.db_vacuum()
     assert err["success"] is False

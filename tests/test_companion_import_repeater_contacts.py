@@ -46,7 +46,7 @@ SEEDS = [
 def handler():
     d = tempfile.mkdtemp()
     h = SQLiteHandler(Path(d))
-    con = sqlite3.connect(os.path.join(d, "repeater.db"))
+    con = sqlite3.connect(os.path.join(d, "repeater-volatile.db"))
     now = time.time()
     for pk, name, ctype, _ in SEEDS:
         con.execute(
