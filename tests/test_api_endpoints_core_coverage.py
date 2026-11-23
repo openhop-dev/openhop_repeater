@@ -2924,3 +2924,97 @@ def test_restart_service_options_method_and_result_paths(cherrypy_ctx):
         err = api.restart_service()
     assert err["success"] is False
     assert "nope" in err["error"]
+
+
+def test_send_raw_packet_validates_input(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api()
+    request.method = "POST"
+
+    for body, message in [
+        ({}, "Missing hex"),
+        ({"hex": "zz"}, "not valid hexadecimal"),
+        ({"hex": "15"}, "must be 2-255 bytes"),
+        ({"hex": "00" * 256}, "must be 2-255 bytes"),
+        ({"hex": "1503aa"}, "could not be parsed"),
+    ]:
+        request.json = body
+        result = api.send_raw_packet()
+        assert result["success"] is False
+        assert message in result["error"]
+
+    request.json = {"hex": "1500deadbeef"}
+    no_router = api.send_raw_packet()
+    assert no_router["success"] is False
+    assert "router not available" in no_router["error"]
+
+    api.daemon_instance = SimpleNamespace(router=SimpleNamespace(inject_packet=AsyncMock()))
+    no_loop = api.send_raw_packet()
+    assert no_loop["success"] is False
+    assert "Event loop not available" in no_loop["error"]
+
+
+def test_send_raw_packet_injects_parsed_packet(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api()
+    request.method = "POST"
+    request.json = {"hex": "1500deadbeef"}
+
+    injector = AsyncMock(return_value=True)
+    api.daemon_instance = SimpleNamespace(router=SimpleNamespace(inject_packet=injector))
+    api.event_loop = asyncio.new_event_loop()
+    try:
+
+        def _run_now(coro, loop):
+            fut = MagicMock()
+            fut.result.return_value = loop.run_until_complete(coro)
+            return fut
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_run_now):
+            ok = api.send_raw_packet()
+        assert ok["success"] is True
+        assert ok["data"]["sent"] is True
+        assert ok["data"]["hash"]
+        packet = injector.await_args.args[0]
+        assert packet.write_to().hex() == "1500deadbeef"
+        assert injector.await_args.kwargs == {"wait_for_ack": False}
+
+        injector.return_value = False
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_run_now):
+            refused = api.send_raw_packet()
+        assert refused["success"] is False
+        assert "not transmitted" in refused["error"]
+    finally:
+        api.event_loop.close()
+
+
+def test_send_raw_packet_times_out(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    api = _make_api()
+    request.method = "POST"
+    request.json = {"hex": "1500deadbeef"}
+    api.daemon_instance = SimpleNamespace(router=SimpleNamespace(inject_packet=AsyncMock()))
+    api.event_loop = object()
+
+    future = MagicMock()
+    future.result.side_effect = FutureTimeoutError()
+
+    def _schedule_and_close(coro, _loop):
+        coro.close()
+        return future
+
+    with patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_and_close):
+        result = api.send_raw_packet()
+    assert result["success"] is False
+    assert "Timed out" in result["error"]
+    future.cancel.assert_called_once()
+
+
+def test_send_raw_packet_requires_post(cherrypy_ctx):
+    request, response = cherrypy_ctx
+    api = _make_api()
+    request.method = "GET"
+    with pytest.raises(cherrypy.HTTPError) as exc:
+        api.send_raw_packet()
+    assert exc.value.status == 405
+    assert response.headers["Allow"] == "POST"

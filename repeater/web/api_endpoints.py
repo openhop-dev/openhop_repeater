@@ -2052,6 +2052,80 @@ class APIEndpoints:
             logger.error("Error sending advert: %s", e, exc_info=True)
             return self._error(e)
 
+    # Largest frame MeshCore can carry: header, transport codes, path length,
+    # 64 path bytes and a 184-byte payload.
+    MAX_RAW_PACKET_BYTES = 255
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def send_raw_packet(self):
+        """Transmit a complete, already-encoded MeshCore packet.
+
+        POST {"hex": "<packet bytes as hex>"}. The packet is sent through
+        router.inject_packet, the same path the repeater uses for packets it
+        originates. Intended for integrations such as channel bridges that
+        relay a packet heard elsewhere without re-encrypting it.
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        future = None
+        try:
+            self._require_post()
+            data = cherrypy.request.json or {}
+            hex_str = str(data.get("hex", "")).strip()
+            if not hex_str:
+                return self._error("Missing hex parameter")
+            try:
+                raw = bytes.fromhex(hex_str)
+            except ValueError:
+                return self._error("hex is not valid hexadecimal")
+            if not 2 <= len(raw) <= self.MAX_RAW_PACKET_BYTES:
+                return self._error(
+                    f"Packet must be 2-{self.MAX_RAW_PACKET_BYTES} bytes, got {len(raw)}"
+                )
+
+            from openhop_core.protocol import Packet
+
+            packet = Packet()
+            try:
+                if not packet.read_from(raw):
+                    return self._error("Packet could not be parsed")
+            except ValueError as e:
+                return self._error(f"Packet could not be parsed: {e}")
+
+            router = getattr(self.daemon_instance, "router", None)
+            injector = getattr(router, "inject_packet", None)
+            if not callable(injector):
+                return self._error("Packet router not available")
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+
+            future = asyncio.run_coroutine_threadsafe(
+                injector(packet, wait_for_ack=False), self.event_loop
+            )
+            sent = future.result(timeout=10)
+            packet_hash = packet.get_packet_hash_hex()
+            if not sent:
+                return self._error("Packet was not transmitted")
+            logger.info("Raw packet %s (%d bytes) transmitted via API", packet_hash, len(raw))
+            return self._success({"sent": True, "hash": packet_hash})
+        except FutureTimeoutError:
+            logger.error("Error sending raw packet: timeout waiting for transmission")
+            if future is not None:
+                future.cancel()
+            return self._error("Timed out waiting for transmission after 10 seconds")
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error("Error sending raw packet: %s", e, exc_info=True)
+            return self._error(e)
+
     @cherrypy.expose
     @cherrypy.tools.json_out()
     @cherrypy.tools.json_in()

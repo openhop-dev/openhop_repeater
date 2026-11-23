@@ -478,6 +478,54 @@ paths:
         '405':
           description: Method not allowed
 
+  /send_raw_packet:
+    post:
+      tags: [Packets]
+      summary: Transmit a raw packet
+      description: >-
+        Transmit a complete, already-encoded MeshCore packet through the same
+        inject path the repeater uses for packets it originates. Useful for
+        integrations that relay a packet heard elsewhere, such as a channel
+        bridge, without re-encrypting it.
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hex]
+              properties:
+                hex:
+                  type: string
+                  description: Packet bytes as hexadecimal (2-255 bytes)
+                  example: "1500deadbeef"
+      responses:
+        '200':
+          description: Packet transmitted, or an error explaining why not
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      sent:
+                        type: boolean
+                      hash:
+                        type: string
+                        description: Packet hash (hex)
+                  error:
+                    type: string
+        '405':
+          description: Method not allowed
+
   /logs:
     get:
       tags: [System]
