@@ -471,7 +471,18 @@ class PacketRouter:
                 # Use local_transmission=True to bypass forwarding logic
                 sent = await self.daemon.repeater_handler(packet, metadata, local_transmission=True)
             if not sent:
-                logger.warning("Injected packet failed local transmission")
+                mode = (self.daemon.config.get("repeater") or {}).get("mode", "forward")
+                if mode == "no_tx":
+                    # The engine refuses every local TX in no_tx mode. Say so, otherwise the
+                    # only symptom is a generic warning and companions that silently stop
+                    # reaching the mesh (the mode is persisted, so it survives restarts).
+                    logger.warning(
+                        "Injected packet not transmitted: repeater mode is 'no_tx' "
+                        "(all TX disabled, companions included). Set mode to "
+                        "'forward' or 'monitor' to transmit again."
+                    )
+                else:
+                    logger.warning("Injected packet failed local transmission")
                 return False
 
             # Mark so when this packet is dequeued we don't pass to engine again (avoid double-send / double-count)
