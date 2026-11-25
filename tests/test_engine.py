@@ -3053,3 +3053,15 @@ class TestEngineRecordAndCleanupHelpers:
         handler.cleanup()
 
         fake_task.cancel.assert_called_once()
+
+
+def test_read_noise_floor_treats_zero_dbm_as_no_reading():
+    """A 0 dBm answer from the radio is not a noise floor: report no reading."""
+    from repeater.engine import RepeaterHandler
+
+    radio = MagicMock()
+    radio.get_noise_floor.return_value = 0
+    assert RepeaterHandler._read_noise_floor(radio) is None
+
+    radio.get_noise_floor.return_value = -112
+    assert RepeaterHandler._read_noise_floor(radio) == -112
