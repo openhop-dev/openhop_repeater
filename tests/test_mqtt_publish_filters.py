@@ -296,6 +296,11 @@ def test_trace_records_carry_an_operational_drop_reason():
     assert _trace_record()["drop_reason"] == "trace_received"
 
 
+def test_trace_record_length_is_the_frame_on_air():
+    """As the engine's records: the airtime charts charge this length."""
+    assert _trace_record()["length"] == 20
+
+
 def test_trace_reaches_the_brokers_through_the_default_path(tmp_path):
     """TraceHelper -> log_trace_record -> record_packet (no flag) -> MQTT."""
     collector = _make_collector(tmp_path)

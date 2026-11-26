@@ -1056,7 +1056,9 @@ class RepeaterHandler(BaseHandler):
             "payload_length": len(payload) if payload else 0,
             "type": payload_type,
             "route": route_type,
-            "length": payload_len,
+            # The whole frame on air; the airtime charts charge it. The payload
+            # alone is payload_length.
+            "length": packet.get_raw_length() if hasattr(packet, "get_raw_length") else payload_len,
             "rssi": rssi,
             "snr": snr,
             "score": flood_rx_metrics(

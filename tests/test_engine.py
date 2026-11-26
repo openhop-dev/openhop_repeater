@@ -1416,6 +1416,31 @@ class TestAirtimeIntegration:
         long_ = handler.airtime_mgr.calculate_airtime(200)
         assert long_ > short
 
+    def test_airtime_chart_charges_a_stored_packet_its_whole_frame(self, handler, tmp_path):
+        """The chart must agree with the duty-cycle meter, which counts the path too."""
+        from repeater.data_acquisition.sqlite_handler import SQLiteHandler
+
+        pkt = _make_transport_flood_packet(payload=bytes(40), path=bytes(6))
+        record = handler._build_packet_record(
+            pkt, pkt.get_payload_type(), pkt.get_route_type(), -90, 7.5, [], 1, None, None, None
+        )
+        storage = SQLiteHandler(tmp_path)
+        storage.store_packet(record)
+
+        radio = handler.radio_config
+        chart = storage.get_airtime_buckets(
+            record["timestamp"] - 60,
+            record["timestamp"] + 60,
+            sf=radio["spreading_factor"],
+            bw_hz=radio["bandwidth"],
+            cr=radio["coding_rate"],
+            preamble=radio["preamble_length"],
+        )
+
+        assert chart["buckets"][0]["rx_ms"] == pytest.approx(
+            handler.airtime_mgr.calculate_airtime(pkt.get_raw_length())
+        )
+
 
 # ===================================================================
 # 11. Config reload

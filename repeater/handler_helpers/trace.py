@@ -257,7 +257,11 @@ class TraceHelper:
             ),
             "type": packet.get_payload_type(),  # 0x09 for trace
             "route": packet.get_route_type(),  # Should be direct (1)
-            "length": len(packet.payload or b""),
+            "length": (
+                packet.get_raw_length()
+                if hasattr(packet, "get_raw_length")
+                else len(packet.payload or b"")
+            ),
             "rssi": getattr(packet, "rssi", 0),
             "snr": getattr(packet, "snr", 0.0),
             "score": (
