@@ -238,6 +238,29 @@
       "use_dio2_rf": true,
       "preamble_length": 32
     },
+    "nebra-duo-hat-e80": {
+      "name": "NebraDuo-E80-LR1121",
+      "chip": "lr1121",
+      "bus_id": 0,
+      "cs_id": 1,
+      "cs_pin": -1,
+      "reset_pin": 18,
+      "busy_pin": 17,
+      "irq_pin": 27,
+      "txen_pin": -1,
+      "rxen_pin": -1,
+      "txled_pin": -1,
+      "rxled_pin": -1,
+      "tx_power": 22,
+      "use_dio3_tcxo": true,
+      "dio3_tcxo_voltage": 1.8,
+      "rf_switch": [3, 0, 2, 3, 1, 0, 0, 0],
+      "cad": {
+        "peak_threshold": 50,
+        "min_threshold": 10
+      },
+      "preamble_length": 32
+    },
     "ch341-usb-sx1262": {
       "name": "CH341 USB-SPI + SX1262",
       "description": "SX1262 via CH341 USB-to-SPI adapter. NOTE: pin numbers are CH341 GPIO 0-7, not BCM.",
