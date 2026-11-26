@@ -1271,7 +1271,7 @@ def test_db_stats_options_success_and_error(cherrypy_ctx, tmp_path):
     rrd.write_bytes(b"123456")
     sqlite_handler = SimpleNamespace(
         get_table_stats=MagicMock(return_value={"packets": {"rows": 10}}),
-        storage_dir=tmp_path,
+        volatile_dir=tmp_path,
     )
     _attach_storage(
         api,
@@ -1290,8 +1290,8 @@ def test_db_stats_options_success_and_error(cherrypy_ctx, tmp_path):
     assert result["data"]["metrics_data_source"] == "rrd"
     assert result["data"]["rrd_size_bytes"] == 6
 
-    sqlite_handler.storage_dir = tmp_path / "missing"
-    sqlite_handler.storage_dir.mkdir()
+    sqlite_handler.volatile_dir = tmp_path / "missing"
+    sqlite_handler.volatile_dir.mkdir()
     _attach_storage(
         api,
         SimpleNamespace(

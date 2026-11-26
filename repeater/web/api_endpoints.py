@@ -9447,7 +9447,7 @@ class APIEndpoints:
             storage = self._get_storage()
             stats = storage.sqlite_handler.get_table_stats()
 
-            rrd_path = storage.sqlite_handler.storage_dir / "metrics.rrd"
+            rrd_path = storage.sqlite_handler.volatile_dir / "metrics.rrd"
             rrd_exists = rrd_path.exists()
             stats["rrd_enabled"] = bool(getattr(storage, "rrd_enabled", True))
             stats["rrd_available"] = bool(getattr(storage, "rrd_handler", None)) and rrd_exists

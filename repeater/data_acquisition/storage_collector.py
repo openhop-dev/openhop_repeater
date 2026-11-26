@@ -79,7 +79,9 @@ class StorageCollector:
         self.network_usage.start()
         self.rrd_handler = None
         if self.rrd_enabled:
-            candidate_rrd_handler = RRDToolHandler(self.storage_dir)
+            # Same directory as repeater-volatile.db: its cumulative counters come from
+            # the packets table, so both must restart from zero together.
+            candidate_rrd_handler = RRDToolHandler(self.sqlite_handler.volatile_dir)
             if candidate_rrd_handler.available and candidate_rrd_handler.rrd_path.exists():
                 self.rrd_handler = candidate_rrd_handler
                 logger.info("RRDtool metrics enabled")

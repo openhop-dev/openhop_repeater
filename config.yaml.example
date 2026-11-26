@@ -153,7 +153,8 @@ policy:
 
 metrics:
   # Store historical metrics in RRDtool when available.
-  # When disabled, chart APIs calculate metrics from repeater.db.
+  # When disabled, chart APIs calculate metrics from repeater-volatile.db.
+  # metrics.rrd is stored in storage.volatile_dir.
   rrd_enabled: true
 
 # Local GPS receiver. When enabled, the daemon reads NMEA sentences from the
@@ -774,14 +775,15 @@ duty_cycle:
 
 # Storage Configuration
 storage:
-  # Directory for persistent storage files (SQLite, RRD).
+  # Directory for persistent storage files (repeater.db, plugins, config).
   # Use a writable path for local/dev (e.g. "./var/openhop_repeater" or "~/var/openhop_repeater").
   storage_dir: "/var/lib/openhop_repeater"
 
-  # Optional: directory for repeater-volatile.db (SQLite). Defaults to storage_dir.
+  # Optional: directory for volatile data: repeater-volatile.db (SQLite) and
+  # metrics.rrd. Defaults to storage_dir.
   # Point it to a tmpfs (e.g. "/dev/shm/openhop_repeater") to avoid SD-card writes.
-  # This database stores statistics and packets, it is lost at reboot.
-  # repeater.db (tokens, ACL, contacts...), plugins, config and RRD stay in storage_dir.
+  # These files store statistics and packets, they are lost at reboot.
+  # repeater.db (tokens, ACL, contacts...), plugins and config stay in storage_dir.
   # volatile_dir: "/dev/shm/openhop_repeater"
 
   # Data retention settings
