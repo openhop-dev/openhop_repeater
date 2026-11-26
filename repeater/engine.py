@@ -676,6 +676,7 @@ class RepeaterHandler(BaseHandler):
             lbt_backoff_delays_ms=lbt_backoff_delays_ms,
             lbt_channel_busy=lbt_channel_busy,
             packet_hash=pkt_hash_full,
+            originated=local_transmission,
         )
 
         # Store packet record to persistent storage
@@ -1008,6 +1009,7 @@ class RepeaterHandler(BaseHandler):
         lbt_backoff_delays_ms=None,
         lbt_channel_busy: bool = False,
         packet_hash: Optional[str] = None,
+        originated: bool = False,
     ) -> dict:
         """Build a single packet_record dict for storage and recent_packets.
 
@@ -1015,6 +1017,12 @@ class RepeaterHandler(BaseHandler):
         every radio that successfully transmitted this logical packet.
         """
         pkt_hash = packet_hash or packet.calculate_packet_hash().hex().upper()
+        if not rx_radio_id and not originated and not self.airtime_budgets.multi:
+            # Core names an ingress radio only through a fabric. A node with one
+            # plain radio heard it on that radio, the one its reception was
+            # metered on; without the id the charts read a forwarded row as
+            # originated here and leave its reception out.
+            rx_radio_id = self.airtime_budgets.default_radio_id
         payload = getattr(packet, "payload", None)
         payload_len = len(payload or b"")
         upstream_hash, upstream_hash_size = self.neighbour_link_tracker.get_upstream_peer_identity(
