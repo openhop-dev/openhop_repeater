@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    if ! getent passwd openhop >/dev/null; then
+        adduser --system --group --home /var/lib/openhop-cz --no-create-home \
+            --gecos "openHop Repeater" openhop >/dev/null
+    fi
+    for grp in spi i2c gpio; do
+        getent group "$grp" >/dev/null && usermod -aG "$grp" openhop || true
+    done
+    install -d -o openhop -g openhop -m 0755 /etc/openhop-cz
+    install -d -o openhop -g openhop -m 0750 /var/lib/openhop-cz
+    # The web dashboard's setup wizard looks for these in the storage directory.
+    for f in radio-settings.json radio-presets.json; do
+        ln -sf "/opt/openhop-cz/share/$f" "/var/lib/openhop-cz/$f"
+    done
+    /opt/openhop-cz/venv/bin/python -m compileall -q /opt/openhop-cz/venv/lib /opt/openhop-cz/bin >/dev/null 2>&1 || true
+    udevadm control --reload >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=leds --action=add >/dev/null 2>&1 || true
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl enable openhop-cz-boot.service >/dev/null 2>&1 || true
+        # On upgrade, bring the repeater back if it was running before.
+        if [ -e /run/openhop-cz.was-running ]; then
+            rm -f /run/openhop-cz.was-running
+            systemctl start openhop-cz.service || true
+        fi
+    fi
+fi
+exit 0

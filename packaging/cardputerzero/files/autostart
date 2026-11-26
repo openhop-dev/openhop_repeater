@@ -1,0 +1,7 @@
+#!/bin/sh
+# Toggle the start-at-boot flag read by openhop-cz-boot.service.
+case "$1" in
+    on)  : > /etc/openhop-cz/autostart ;;
+    off) rm -f /etc/openhop-cz/autostart ;;
+    *)   echo "usage: autostart on|off" >&2; exit 64 ;;
+esac

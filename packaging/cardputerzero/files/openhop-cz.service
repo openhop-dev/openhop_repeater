@@ -1,0 +1,29 @@
+[Unit]
+Description=openHop Repeater (CardputerZero + Cap LoRa-1262)
+Documentation=https://docs.openhop.dev/projects/openhop-repeater/
+After=network.target
+ConditionPathExists=/etc/openhop-cz/config.yaml
+
+[Service]
+Type=simple
+User=openhop
+Group=openhop
+SupplementaryGroups=spi i2c gpio
+WorkingDirectory=/var/lib/openhop-cz
+Environment=OPENHOP_REPEATER_CONFIG=/etc/openhop-cz/config.yaml
+Environment=PYTHONUNBUFFERED=1
+# Power the Cap's 5V rail and enable its antenna switch before the radio starts.
+ExecStartPre=/usr/bin/python3 /opt/openhop-cz/bin/cap_lora_power.py on
+ExecStart=/opt/openhop-cz/venv/bin/python -m repeater.main --config /etc/openhop-cz/config.yaml
+ExecStopPost=/usr/bin/python3 /opt/openhop-cz/bin/cap_lora_power.py off
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+MemoryHigh=160M
+SyslogIdentifier=openhop-cz
+NoNewPrivileges=yes
+ProtectSystem=full
+ReadWritePaths=/etc/openhop-cz /var/lib/openhop-cz
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+[ -d /run/systemd/system ] && systemctl daemon-reload >/dev/null 2>&1 || true
+if [ "$1" = "purge" ]; then
+    rm -rf /etc/openhop-cz /var/lib/openhop-cz
+    getent passwd openhop >/dev/null && deluser --system openhop >/dev/null 2>&1 || true
+fi
+exit 0
