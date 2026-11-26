@@ -9580,6 +9580,7 @@ class APIEndpoints:
 
             type_descriptions = {
                 "bme280": "Temperature, humidity, and barometric pressure",
+                "bme680": "Temperature, humidity, barometric pressure, and gas resistance",
                 "ens210": "Relative humidity and temperature",
                 "hardware_stats": "CPU, memory, disk, and system metrics",
                 "ina219": "Current, voltage, and power monitor",
