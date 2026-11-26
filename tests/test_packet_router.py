@@ -1306,6 +1306,24 @@ class TestInjectedTxRawEcho(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         daemon._on_raw_rx_for_companions.assert_not_awaited()
 
+    async def test_inject_packet_failure_names_no_tx_mode(self):
+        """In no_tx mode the warning must say that the mode blocked the TX."""
+        for mode, expected in (
+            ("no_tx", "repeater mode is 'no_tx'"),
+            ("forward", "Injected packet failed local transmission"),
+        ):
+            with self.subTest(mode=mode):
+                daemon = _make_daemon()
+                daemon.config = {"repeater": {"mode": mode}}
+                daemon.repeater_handler = AsyncMock(return_value=False)
+                router = PacketRouter(daemon)
+
+                with self.assertLogs("PacketRouter", level="WARNING") as logs:
+                    ok = await router.inject_packet(_make_packet())
+
+                self.assertFalse(ok)
+                self.assertTrue(any(expected in line for line in logs.output), logs.output)
+
     async def test_inject_packet_survives_echo_failure(self):
         """An error while echoing must not fail the injection."""
         daemon = _make_daemon()
