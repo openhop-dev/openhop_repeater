@@ -155,6 +155,22 @@ class FanoutTxResult:
         return self.results[0] if self.results else None
 
 
+_ZERO_NOISE_FLOOR = {"count": 0, "warned_at": 0.0}
+
+
+def _warn_zero_noise_floor() -> None:
+    """Count 0 dBm noise floor readings; warn at most every 10 minutes."""
+    _ZERO_NOISE_FLOOR["count"] += 1
+    now = time.time()
+    if now - _ZERO_NOISE_FLOOR["warned_at"] >= 600:
+        _ZERO_NOISE_FLOOR["warned_at"] = now
+        logger.warning(
+            "Radio reported a 0 dBm noise floor (%d reading(s) so far); ignored. "
+            "A modem reset usually clears this.",
+            _ZERO_NOISE_FLOOR["count"],
+        )
+
+
 class RepeaterHandler(BaseHandler):
     @staticmethod
     def payload_type() -> int:
@@ -2413,7 +2429,15 @@ class RepeaterHandler(BaseHandler):
         """Read one radio's noise floor, or None when it cannot answer."""
         try:
             if radio is not None and hasattr(radio, "get_noise_floor"):
-                return radio.get_noise_floor()
+                value = radio.get_noise_floor()
+                if value == 0:
+                    # Some modems (seen on a Heltec V3 running the MeshCore KISS modem
+                    # firmware) start answering 0 dBm after a few hours, until they are
+                    # reset. 0 dBm is not a real LoRa noise floor: treat it as no reading
+                    # so it is not stored, charted or published over MQTT.
+                    _warn_zero_noise_floor()
+                    return None
+                return value
             return None
         except Exception as e:
             logger.debug(f"Failed to get noise floor: {e}")
