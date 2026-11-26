@@ -79,7 +79,7 @@ class LafvinUps3sSensor(SensorBase):
             "key": "bus_number",
             "type": "integer",
             "label": "I2C Bus Number",
-            "default": 0,
+            "default": 1,
             "help": "Linux I2C bus number",
         },
         {
