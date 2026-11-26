@@ -42,6 +42,8 @@ Default root (under Repeater storage):
 ```
 
 - Code and virtualenv are **version-specific**.
+- Installing a release removes the other release directories, unless the
+  plugin is running. An update stops the plugin first.
 - The installed wheel is retained with each release so its virtualenv can be
   rebuilt automatically if a future container image changes Python versions.
 - `data/` is **not** version-specific and is never interpreted by the manager.
