@@ -410,7 +410,8 @@ class VictronVEDirectSensor(SensorBase):
             exclusive=True,
         ) as port:
             remaining_bytes = 16384
-            while remaining_bytes and time.monotonic() < deadline:
+            while remaining_bytes:
+                # Read once even past the deadline; a zero timeout is non-blocking in pyserial.
                 port.timeout = min(0.1, max(0, deadline - time.monotonic()))
                 payload = port.read(min(256, remaining_bytes))
                 remaining_bytes -= len(payload)
@@ -419,6 +420,8 @@ class VictronVEDirectSensor(SensorBase):
                     received_frame = True
                     self._seen.update(set(fields) & FIELDS.keys())
                     data.update(normalize(fields))
+                if time.monotonic() >= deadline:
+                    break
         if received_frame:
             return data
         raise RuntimeError("No valid VE.Direct text frame before read limit")
