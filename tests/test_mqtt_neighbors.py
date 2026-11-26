@@ -1947,7 +1947,7 @@ def test_query_neighbor_scopes_endpoint_without_a_publisher(monkeypatch):
     assert "not available" in out["error"]
 
 
-@pytest.mark.parametrize("name", ["query_neighbor_scopes"])
+@pytest.mark.parametrize("name", ["query_neighbor_scopes", "db_purge"])
 def test_json_body_endpoints_enable_the_json_in_tool(name):
     """cherrypy.request.json only exists when json_in is on for the handler.
 
