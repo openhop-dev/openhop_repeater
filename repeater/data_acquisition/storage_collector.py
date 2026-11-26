@@ -54,12 +54,12 @@ class StorageCollector:
         self.rrd_enabled = bool(metrics_config.get("rrd_enabled", True))
 
         # Dedicated single writer thread for all blocking storage work (the SQLite
-        # write, the cumulative-counts aggregate, RRD updates, and network
-        # publishing). This keeps that work off the asyncio event loop, which it
-        # was previously stalling for seconds per packet on a busy mesh — starving
-        # every other coroutine (e.g. send_advert would time out). One worker
-        # preserves packet write ordering and reuses a single thread-local SQLite
-        # connection (no WAL writer contention, no connection fan-out).
+        # write, RRD updates, and network publishing). This keeps that work off
+        # the asyncio event loop, which it was previously stalling for seconds per
+        # packet on a busy mesh — starving every other coroutine (e.g. send_advert
+        # would time out). One worker preserves packet write ordering and reuses a
+        # single thread-local SQLite connection (no WAL writer contention, no
+        # connection fan-out).
         self._db_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="storage-writer"
         )
@@ -319,8 +319,8 @@ class StorageCollector:
     ):
         """Record a packet to storage and publish it.
 
-        All blocking work — the SQLite write, the cumulative-counts aggregate, the
-        RRD update, and network publishing — runs on the dedicated writer thread so
+        All blocking work — the SQLite write, the RRD update, and network
+        publishing — runs on the dedicated writer thread so
         it never blocks the asyncio event loop. Callers treat this as
         fire-and-forget (the previous synchronous version blocked the loop).
 
@@ -361,7 +361,7 @@ class StorageCollector:
     def _record_packet_blocking(
         self, packet_record: dict, skip_mqtt: bool, tx_egress: Optional[list] = None
     ):
-        """Store, aggregate, update metrics, and publish one packet (writer thread)."""
+        """Store, update metrics, and publish one packet (writer thread)."""
         packet_id = self.sqlite_handler.store_packet(packet_record)
         if packet_id is not None:
             packet_record["id"] = packet_id
@@ -371,8 +371,7 @@ class StorageCollector:
                 )
 
         if self.rrd_handler is not None:
-            cumulative_counts = self.sqlite_handler.get_cumulative_counts()
-            self.rrd_handler.update_packet_metrics(packet_record, cumulative_counts)
+            self.rrd_handler.update_packet_metrics(packet_record)
 
         self._publish_packet_sync(packet_record, skip_mqtt)
 

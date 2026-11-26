@@ -702,14 +702,6 @@ class SQLiteHandler:
         self._packet_stats_cache = {}
         self._packet_type_stats_cache = {}
         self._neighbors_cache = {"timestamp": 0.0, "value": None}
-        # Short time-based cache for the per-packet cumulative-counts aggregate
-        # (two full-table scans). The storage writer thread calls this once per
-        # recorded packet/duplicate; a few seconds of staleness is fine for the
-        # RRD/UI counters and stops a full scan running on every packet.
-        # Intentionally NOT cleared by _invalidate_hot_caches() — that runs on
-        # every write, which would defeat the cache under load.
-        self._cumulative_counts_cache = {"timestamp": 0.0, "value": None}
-        self._cumulative_counts_ttl_sec = 3.0
         # Optional callback fired after any transport_keys (region) write, so the
         # daemon can rebuild the flood-reply RegionMap. Fired after commit, in the
         # writer's thread; see set_transport_keys_changed_callback.
@@ -4195,53 +4187,6 @@ class SQLiteHandler:
 
         except Exception as e:
             logger.error(f"Failed to cleanup old data: {e}")
-
-    def get_cumulative_counts(self) -> dict:
-        now = time.time()
-        cached = self._cumulative_counts_cache.get("value")
-        cached_ts = float(self._cumulative_counts_cache.get("timestamp", 0.0))
-        if cached is not None and (now - cached_ts) < self._cumulative_counts_ttl_sec:
-            return cached
-        try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-
-                type_rows = conn.execute(
-                    "SELECT type, COUNT(*) as count FROM packets GROUP BY type"
-                ).fetchall()
-
-                type_counts = {f"type_{i}": 0 for i in range(16)}
-                type_counts["type_other"] = 0
-                for row in type_rows:
-                    pkt_type = int(row["type"])
-                    count = int(row["count"])
-                    if pkt_type <= 15:
-                        type_counts[f"type_{pkt_type}"] = count
-                    else:
-                        type_counts["type_other"] += count
-
-                totals = conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) AS rx_total,
-                        SUM(CASE WHEN transmitted = 1 THEN 1 ELSE 0 END) AS tx_total,
-                        SUM(CASE WHEN transmitted = 0 THEN 1 ELSE 0 END) AS drop_total
-                    FROM packets
-                """
-                ).fetchone()
-
-                result = {
-                    "rx_total": int(totals["rx_total"] or 0),
-                    "tx_total": int(totals["tx_total"] or 0),
-                    "drop_total": int(totals["drop_total"] or 0),
-                    "type_counts": type_counts,
-                }
-                self._cumulative_counts_cache = {"timestamp": now, "value": result}
-                return result
-
-        except Exception as e:
-            logger.error(f"Failed to get cumulative counts: {e}")
-            return {"rx_total": 0, "tx_total": 0, "drop_total": 0, "type_counts": {}}
 
     def get_adverts_by_contact_type(
         self,
