@@ -812,6 +812,54 @@ def get_radio_for_board(board_config: dict):
 
         return radio
 
+    elif radio_type == "sx1276":
+        # SX1276/SX1278 (Dragino LoRa/GPS HAT, RFM95 boards). Pins come from an
+        # 'sx1276' section, or from the 'sx1262' section the web setup wizard writes.
+        from openhop_core.hardware.sx1276_wrapper import SX1276Radio
+
+        spi_config = board_config.get("sx1276") or board_config.get("sx1262")
+        if not spi_config:
+            raise ValueError("Missing 'sx1276' (or 'sx1262') section in configuration file")
+        radio_config = board_config.get("radio")
+        if not radio_config:
+            raise ValueError("Missing 'radio' section in configuration file")
+
+        combined_config = {
+            "bus_id": _parse_int(spi_config.get("bus_id", 0), default=0),
+            "cs_id": _parse_int(spi_config.get("cs_id", 0), default=0),
+            "cs_pin": _parse_int(spi_config.get("cs_pin", 25), default=25),
+            "reset_pin": _parse_int(spi_config.get("reset_pin", 17), default=17),
+            "irq_pin": _parse_int(spi_config.get("irq_pin", 4), default=4),
+            "txen_pin": _parse_int(spi_config.get("txen_pin", -1), default=-1),
+            "rxen_pin": _parse_int(spi_config.get("rxen_pin", -1), default=-1),
+            "txled_pin": _parse_int(spi_config.get("txled_pin", -1), default=-1),
+            "rxled_pin": _parse_int(spi_config.get("rxled_pin", -1), default=-1),
+            "gpio_chip": _parse_int(spi_config.get("gpio_chip", 0), default=0),
+            "use_gpiod_backend": spi_config.get("use_gpiod_backend", False),
+            "current_limit_ma": _parse_int(spi_config.get("current_limit_ma", 120), default=120),
+            "frequency": int(radio_config["frequency"]),
+            "tx_power": radio_config["tx_power"],
+            "spreading_factor": radio_config["spreading_factor"],
+            "bandwidth": int(radio_config["bandwidth"]),
+            "coding_rate": radio_config["coding_rate"],
+            "preamble_length": radio_config["preamble_length"],
+            "sync_word": _parse_int(radio_config.get("sync_word", 0x12)),
+        }
+        en_pins = _parse_int_list(spi_config.get("en_pins"))
+        if en_pins:
+            combined_config["en_pins"] = en_pins
+        elif spi_config.get("en_pin") is not None:
+            combined_config["en_pin"] = _parse_int(spi_config.get("en_pin"), default=-1)
+        if "radio_timing_delay" in spi_config:
+            combined_config["radio_timing_delay"] = float(spi_config["radio_timing_delay"])
+
+        radio = SX1276Radio(**combined_config)
+        try:
+            radio.begin()
+        except RuntimeError as e:
+            raise RuntimeError(f"Failed to initialize SX1276 radio: {e}") from e
+        return radio
+
     elif radio_type == "kiss":
         try:
             from openhop_core.hardware.kiss_modem_wrapper import KissModemWrapper
@@ -977,7 +1025,7 @@ def get_radio_for_board(board_config: dict):
 
     raise RuntimeError(
         f"Unknown radio type: {radio_type}. "
-        "Supported: sx1262, sx1262_ch341, kiss (or kiss-modem), modem_tcp, modem_usb"
+        "Supported: sx1262, sx1262_ch341, sx1276, kiss (or kiss-modem), modem_tcp, modem_usb"
     )
 
 
@@ -1023,6 +1071,7 @@ def _merge_radio_entry(global_config: dict, entry: dict) -> dict:
     for key in (
         "radio",
         "sx1262",
+        "sx1276",
         "ch341",
         "kiss",
         "modem_tcp",

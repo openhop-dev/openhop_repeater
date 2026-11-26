@@ -440,6 +440,23 @@
       "dio3_tcxo_voltage": 1.8,
       "preamble_length": 32
     },
+    "dragino-lora-gps-hat": {
+      "name": "Dragino LoRa/GPS HAT (SX1276)",
+      "description": "Dragino LoRa/GPS HAT v1.4 for Raspberry Pi, SX1276 on PA_BOOST (max 20 dBm). NSS is wired to GPIO25, RESET to GPIO17, DIO0 to GPIO4.",
+      "radio_type": "sx1276",
+      "bus_id": 0,
+      "cs_id": 0,
+      "cs_pin": 25,
+      "reset_pin": 17,
+      "busy_pin": -1,
+      "irq_pin": 4,
+      "txen_pin": -1,
+      "rxen_pin": -1,
+      "txled_pin": -1,
+      "rxled_pin": -1,
+      "tx_power": 20,
+      "preamble_length": 32
+    },
     "modem_usb": {
       "name": "openHop Modem (USB-CDC)",
       "description": "ESP32-S3 / nRF52 openHop Modem connected over USB-CDC. Pick this if the modem is plugged into the host's USB port (e.g. /dev/ttyACM0). Edit the 'modem_usb' section after first-run to point at the right serial device.",
