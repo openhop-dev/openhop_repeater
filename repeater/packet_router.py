@@ -589,7 +589,8 @@ class PacketRouter:
     async def _process_queue(self):
         while self.running:
             try:
-                packet = await asyncio.wait_for(self.queue.get(), timeout=0.1)
+                # stop() cancels this task, so an idle router can simply wait.
+                packet = await self.queue.get()
                 # Drop early if the in-flight cap is reached.  This is a last-resort
                 # safety valve — under normal operation LoRa airtime and the duty-cycle
                 # gate keep _in_flight well below _max_in_flight.
@@ -607,8 +608,6 @@ class PacketRouter:
                 task = asyncio.create_task(self._route_packet(packet))
                 self._route_tasks.add(task)
                 task.add_done_callback(self._on_route_done)
-            except asyncio.TimeoutError:
-                continue
             except Exception as e:
                 logger.error(f"Router error: {e}", exc_info=True)
 
