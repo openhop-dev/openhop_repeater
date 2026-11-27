@@ -745,6 +745,16 @@ class RepeaterDaemon:
             self.protocol_request_helper.register_identity(
                 name="repeater", identity=self.local_identity, identity_type="repeater"
             )
+
+            # Register room server identities too, as _register_identity_everywhere
+            # does for rooms added at runtime. Without this, rooms loaded at
+            # startup never answer status or other REQs.
+            for name, identity, _config in self.identity_manager.get_identities_by_type(
+                "room_server"
+            ):
+                self.protocol_request_helper.register_identity(
+                    name=name, identity=identity, identity_type="room_server"
+                )
             logger.info("Protocol request handler initialized")
 
             # Load companion identities (CompanionBridge + frame server per companion)

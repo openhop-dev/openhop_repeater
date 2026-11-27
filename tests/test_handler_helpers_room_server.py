@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from repeater.handler_helpers.room_server import (
+    INACTIVE_CLIENT_TIMEOUT,
     MAX_POST_TEXT_LEN,
     MAX_UNSYNCED_POSTS,
+    RETRY_BACKOFF_SCHEDULE,
     TXT_TYPE_PLAIN,
     TXT_TYPE_SIGNED_PLAIN,
     GlobalRateLimiter,
@@ -60,6 +62,7 @@ class _FakeDB:
         self.get_all_room_clients = MagicMock(return_value=[])
         self.get_unsynced_messages = MagicMock(return_value=[])
         self.cleanup_old_messages = MagicMock(return_value=0)
+        self.get_room_messages = MagicMock(return_value=[])
 
 
 def _make_room_server(db=None, acl=None, injector=None, max_posts=8):
@@ -687,6 +690,7 @@ async def test_room_server_evict_failed_clients_and_check_ack_timeouts():
 
     now = time.time()
     db.get_all_room_clients.return_value = [
+        # Failed pushes alone do not evict: the client stays in backoff.
         {
             "client_pubkey": (b"J" * 32).hex(),
             "push_failures": 3,
@@ -694,18 +698,29 @@ async def test_room_server_evict_failed_clients_and_check_ack_timeouts():
             "pending_ack_crc": 0,
             "ack_timeout_time": 0,
         },
+        # A few hours idle is normal for a quiet room (clients send no keep-alives).
         {
             "client_pubkey": (b"K" * 32).hex(),
             "push_failures": 0,
-            "last_activity": now - 5000,
+            "last_activity": now - 5 * 3600,
+            "pending_ack_crc": 0,
+            "ack_timeout_time": 0,
+        },
+        # Past the inactivity timeout: evicted.
+        {
+            "client_pubkey": (b"N" * 32).hex(),
+            "push_failures": 0,
+            "last_activity": now - INACTIVE_CLIENT_TIMEOUT - 60,
             "pending_ack_crc": 0,
             "ack_timeout_time": 0,
         },
     ]
 
     await rs._evict_failed_clients()
-    assert db.upsert_client_sync.call_count >= 2
-    assert acl.remove_client.call_count == 2
+    db.upsert_client_sync.assert_called_once()
+    assert db.upsert_client_sync.call_args.kwargs["client_pubkey"] == (b"N" * 32).hex()
+    assert db.upsert_client_sync.call_args.kwargs["last_activity"] == 0
+    acl.remove_client.assert_called_once_with(b"N" * 32)
 
     rs._handle_ack_timeout = AsyncMock()
     db.get_all_room_clients.return_value = [
@@ -722,6 +737,137 @@ async def test_room_server_evict_failed_clients_and_check_ack_timeouts():
     ]
     await rs._check_ack_timeouts()
     rs._handle_ack_timeout.assert_awaited_once_with(b"L" * 32)
+
+
+def _push_patches(packet=None):
+    return (
+        patch(
+            "repeater.handler_helpers.room_server.CryptoUtils.sha256",
+            return_value=b"\x01\x02\x03\x04abcd",
+        ),
+        patch(
+            "repeater.handler_helpers.room_server.PacketBuilder.create_datagram",
+            return_value=packet or SimpleNamespace(path=bytearray(), path_len=0),
+        ),
+    )
+
+
+def _post():
+    return {
+        "author_pubkey": (b"P" * 32).hex(),
+        "message_text": "payload",
+        "post_timestamp": 99.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_push_attempt_does_not_refresh_client_activity():
+    """Only contact (login, post, ACK) counts as activity. A push attempt that
+    refreshed last_activity kept an unreachable client active forever."""
+    db = _FakeDB()
+    db.get_client_sync.return_value = {"push_failures": 0}
+    rs = _make_room_server(db=db, injector=AsyncMock(return_value=False))
+    rs.global_limiter = SimpleNamespace(acquire=AsyncMock(), release=MagicMock())
+    rs._handle_ack_timeout = AsyncMock()
+
+    p1, p2 = _push_patches()
+    with p1, p2:
+        await rs.push_post_to_client(_FakeClient(b"Q" * 32), _post())
+
+    pending_kwargs = db.upsert_client_sync.call_args_list[0].kwargs
+    assert "pending_ack_crc" in pending_kwargs
+    assert "last_activity" not in pending_kwargs
+
+
+@pytest.mark.asyncio
+async def test_failed_direct_push_forgets_path_so_retry_floods():
+    db = _FakeDB()
+    db.get_client_sync.return_value = {"push_failures": 0}
+    rs = _make_room_server(db=db, injector=AsyncMock(return_value=False))
+    rs.global_limiter = SimpleNamespace(acquire=AsyncMock(), release=MagicMock())
+    rs._handle_ack_timeout = AsyncMock()
+    client = _FakeClient(b"S" * 32, out_path=b"\xaa\xbb", out_path_len=2)
+
+    p1, p2 = _push_patches()
+    with p1, p2 as create_datagram:
+        assert await rs.push_post_to_client(client, _post()) is False
+        assert create_datagram.call_args.kwargs["route_type"] == "direct"
+
+    assert client.out_path_len == -1
+    assert client.out_path == bytearray()
+
+    # The retry goes out as a flood.
+    p1, p2 = _push_patches()
+    with p1, p2 as create_datagram:
+        await rs.push_post_to_client(client, _post())
+        assert create_datagram.call_args.kwargs["route_type"] == "flood"
+
+
+@pytest.mark.asyncio
+async def test_successful_direct_push_keeps_path():
+    db = _FakeDB()
+    db.get_client_sync.return_value = {"push_failures": 0}
+    rs = _make_room_server(db=db, injector=AsyncMock(return_value=True))
+    rs.global_limiter = SimpleNamespace(acquire=AsyncMock(), release=MagicMock())
+    rs._handle_ack_received = AsyncMock()
+    client = _FakeClient(b"T" * 32, out_path=b"\xaa\xbb", out_path_len=2)
+
+    p1, p2 = _push_patches()
+    with p1, p2:
+        assert await rs.push_post_to_client(client, _post()) is True
+
+    assert client.out_path_len == 2
+    assert bytes(client.out_path) == b"\xaa\xbb"
+
+
+@pytest.mark.asyncio
+async def test_client_past_max_failures_is_retried_after_last_backoff_step():
+    """A client is never stopped for good: past MAX_PUSH_FAILURES it is retried
+    at the last backoff interval, so it catches up once back in range."""
+    db = _FakeDB()
+    injector = AsyncMock(return_value=True)
+    rs = _make_room_server(db=db, injector=injector)
+    rs.global_limiter = SimpleNamespace(acquire=AsyncMock(), release=MagicMock())
+    rs._handle_ack_received = AsyncMock()
+    client = _FakeClient(b"U" * 32)
+    last_step = RETRY_BACKOFF_SCHEDULE[-1]
+
+    # Still inside the last backoff step: no send.
+    db.get_client_sync.return_value = {"push_failures": 7, "updated_at": time.time()}
+    assert await rs.push_post_to_client(client, _post()) is False
+    injector.assert_not_awaited()
+
+    # Last step elapsed: retried.
+    db.get_client_sync.return_value = {
+        "push_failures": 7,
+        "updated_at": time.time() - last_step - 1,
+    }
+    p1, p2 = _push_patches()
+    with p1, p2:
+        assert await rs.push_post_to_client(client, _post()) is True
+    injector.assert_awaited_once()
+
+
+def test_backoff_remaining_follows_schedule():
+    now = time.time()
+    assert RoomServer._backoff_remaining({"push_failures": 0, "updated_at": now}) == 0
+    assert RoomServer._backoff_remaining({"push_failures": 1, "updated_at": now}) == pytest.approx(
+        RETRY_BACKOFF_SCHEDULE[1], abs=1
+    )
+    assert RoomServer._backoff_remaining({"push_failures": 50, "updated_at": now}) == pytest.approx(
+        RETRY_BACKOFF_SCHEDULE[-1], abs=1
+    )
+    assert RoomServer._backoff_remaining({"push_failures": 2, "updated_at": now - 9999}) == 0
+
+
+@pytest.mark.asyncio
+async def test_add_post_clears_author_push_failures():
+    db = _FakeDB()
+    rs = _make_room_server(db=db, acl=_FakeACL([_FakeClient(b"C" * 32)]))
+
+    assert await rs.add_post(b"V" * 32, "back in range", sender_timestamp=1) is True
+
+    assert db.upsert_client_sync.call_args.kwargs["push_failures"] == 0
 
 
 @pytest.mark.asyncio
@@ -846,3 +992,33 @@ async def test_global_rate_limiter_releases_lock_on_send_exception():
     # The lock is reusable immediately afterwards.
     await limiter.acquire()
     limiter.release()
+
+
+@pytest.mark.asyncio
+async def test_post_timestamps_are_unique_whole_seconds_after_the_last_post():
+    """Firmware getCurrentTimeUnique(): whole seconds, strictly increasing, and
+    after the newest stored post (which may be a legacy fractional value)."""
+    db = _FakeDB()
+    db.get_room_messages.return_value = [{"post_timestamp": 2_000_000_000.75}]
+    rs = _make_room_server(db=db)
+
+    with patch("repeater.handler_helpers.room_server.time.time", return_value=1_000.5):
+        for author in (b"W", b"X", b"Y"):
+            assert await rs.add_post(author * 32, "hi", sender_timestamp=1) is True
+
+    stamps = [c.kwargs["post_timestamp"] for c in db.insert_room_message.call_args_list]
+    assert stamps == [2_000_000_001, 2_000_000_002, 2_000_000_003]
+    assert all(isinstance(t, int) for t in stamps)
+    db.get_room_messages.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_post_timestamp_follows_the_clock_when_it_is_ahead():
+    db = _FakeDB()
+    db.get_room_messages.return_value = [{"post_timestamp": 500.2}]
+    rs = _make_room_server(db=db)
+
+    with patch("repeater.handler_helpers.room_server.time.time", return_value=9_000.9):
+        assert await rs.add_post(b"Z" * 32, "hi", sender_timestamp=1) is True
+
+    assert db.insert_room_message.call_args.kwargs["post_timestamp"] == 9_000
