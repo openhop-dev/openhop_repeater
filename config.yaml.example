@@ -783,6 +783,7 @@ storage:
   # metrics.rrd. Defaults to storage_dir.
   # Point it to a tmpfs (e.g. "/dev/shm/openhop_repeater") to avoid SD-card writes.
   # These files store statistics and packets, they are lost at reboot.
+  # The UI detects a RAM-backed directory (tmpfs, ramfs) and flags the metrics as volatile.
   # repeater.db (tokens, ACL, contacts...), plugins and config stay in storage_dir.
   # volatile_dir: "/dev/shm/openhop_repeater"
 

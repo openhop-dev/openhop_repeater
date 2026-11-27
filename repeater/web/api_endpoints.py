@@ -1880,6 +1880,7 @@ class APIEndpoints:
             # which profile applies to which radio of a Fabric.
             stats["radio_profiles"] = self._active_radio_profiles()
             stats["site_name"] = self.config.get("web", {}).get("site_name", "")
+            stats["metrics_storage"] = self._metrics_storage_info()
             stats["version"] = __version__
             try:
                 import openhop_core
@@ -4240,6 +4241,19 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error getting airtime data: {e}")
             return self._error(e)
+
+    def _metrics_storage_info(self) -> dict:
+        """Where the volatile metrics live; never raises (``/api/stats`` must not fail)."""
+        info = {"volatile": False, "path": None, "since": None}
+        try:
+            handler = getattr(self.daemon_instance, "repeater_handler", None)
+            storage = getattr(handler, "storage", None)
+            sqlite_handler = getattr(storage, "sqlite_handler", None)
+            if sqlite_handler is not None:
+                info.update(sqlite_handler.volatile_storage_info())
+        except Exception as e:
+            logger.debug(f"Could not read metrics storage info: {e}")
+        return info
 
     def _active_radio_profiles(self) -> list:
         """Air settings of the radios currently on the air, in configured order.

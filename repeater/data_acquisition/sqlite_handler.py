@@ -4156,6 +4156,36 @@ class SQLiteHandler:
             path.stat().st_size for path in (self.sqlite_path, self.volatile_path) if path.exists()
         )
 
+    def volatile_storage_info(self) -> dict:
+        """Describe where the volatile metrics live, for ``/api/stats``.
+
+        ``volatile`` is True when ``volatile_dir`` is on a RAM-backed filesystem, so
+        packets and statistics are lost at restart. ``since`` is the Unix timestamp of
+        the oldest data available (oldest packet, else creation time of the database
+        file), or None when unknown.
+        """
+        from repeater.utils.fs import is_volatile_fs
+
+        since = None
+        try:
+            with self._connect() as conn:
+                row = conn.execute("SELECT MIN(timestamp) FROM packets").fetchone()
+            if row and row[0] is not None:
+                since = float(row[0])
+        except Exception as e:
+            logger.debug(f"Could not read oldest packet timestamp: {e}")
+        if since is None:
+            try:
+                info = self.volatile_path.stat()
+                since = float(getattr(info, "st_birthtime", None) or info.st_mtime)
+            except OSError:
+                since = None
+        return {
+            "volatile": is_volatile_fs(self.volatile_dir),
+            "path": str(self.volatile_dir),
+            "since": since,
+        }
+
     def vacuum(self):
         """Reclaim disk space after purging tables (both databases)."""
         try:
