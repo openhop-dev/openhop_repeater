@@ -1028,6 +1028,7 @@ class RepeaterDaemon:
                     stats_getter=self._get_companion_stats,
                     batt_getter=self._companion_battery_mv,
                     storage_dir=self._companion_storage_dir(),
+                    sensor_manager=self.sensor_manager,
                     control_handler=(
                         self.discovery_helper.control_handler if self.discovery_helper else None
                     ),
@@ -1307,6 +1308,7 @@ class RepeaterDaemon:
             stats_getter=self._get_companion_stats,
             batt_getter=self._companion_battery_mv,
             storage_dir=self._companion_storage_dir(),
+            sensor_manager=self.sensor_manager,
             control_handler=(
                 self.discovery_helper.control_handler if self.discovery_helper else None
             ),
