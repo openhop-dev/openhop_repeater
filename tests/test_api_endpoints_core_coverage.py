@@ -991,6 +991,110 @@ def test_config_import_preserves_omitted_modem_tokens_but_accepts_replacements(c
     assert api.config["radios"][1]["modem_tcp"]["token"] == "new-secret"
 
 
+@pytest.mark.parametrize(
+    ("incoming_tcp", "expected_token"),
+    [
+        ({}, "stored-secret"),
+        ({"token": "*** REDACTED ***"}, "stored-secret"),
+        ({"token": "new-secret"}, "new-secret"),
+        ({"token": ""}, ""),
+        ({"token": None}, None),
+    ],
+    ids=["omitted", "redacted", "replacement", "empty", "null"],
+)
+@pytest.mark.parametrize("multi_radio", [False, True], ids=["top-level", "radios"])
+def test_config_import_modem_token_values(cherrypy_ctx, incoming_tcp, expected_token, multi_radio):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.user = {"username": "admin", "auth_type": "jwt"}
+    stored = {
+        "id": "tcp",
+        "radio_type": "modem_tcp",
+        "modem_tcp": {"host": "old.local", "port": 5055, "token": "stored-secret"},
+    }
+    incoming = {
+        "id": "tcp",
+        "radio_type": "modem_tcp",
+        "modem_tcp": {"host": "new.local", **incoming_tcp},
+    }
+    api = _make_api({"radios": [stored]} if multi_radio else stored)
+    request.json = {"config": {"radios": [incoming]} if multi_radio else incoming}
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    saved = api.config["radios"][0] if multi_radio else api.config
+    assert saved["modem_tcp"]["token"] == expected_token
+    assert saved["modem_tcp"]["host"] == "new.local"
+    assert ("port" in saved["modem_tcp"]) is not multi_radio
+    api.config_manager.save_to_file.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("radio_id", "radio_type"),
+    [("tcp", "modem_usb"), ("new", "modem_tcp"), (None, "modem_tcp")],
+    ids=["changed-type", "new-id", "missing-id"],
+)
+@pytest.mark.parametrize("incoming_tcp", [{}, {"token": "*** REDACTED ***"}])
+def test_config_import_radio_token_requires_matching_id_and_type(
+    cherrypy_ctx, radio_id, radio_type, incoming_tcp
+):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.user = {"username": "admin", "auth_type": "jwt"}
+    api = _make_api(
+        {
+            "radios": [
+                {
+                    "id": "tcp",
+                    "radio_type": "modem_tcp",
+                    "modem_tcp": {"host": "old.local", "token": "stored-secret"},
+                }
+            ]
+        }
+    )
+    incoming = {"radio_type": radio_type, "modem_tcp": {"host": "new.local", **incoming_tcp}}
+    if radio_id is not None:
+        incoming["id"] = radio_id
+    request.json = {"config": {"radios": [incoming]}}
+
+    result = api.config_import()
+
+    assert result["success"] is True
+    assert "token" not in api.config["radios"][0]["modem_tcp"]
+
+
+def test_config_import_radio_tokens_follow_ids_when_sections_are_omitted(cherrypy_ctx):
+    request, _ = cherrypy_ctx
+    request.method = "POST"
+    request.user = {"username": "admin", "auth_type": "jwt"}
+    api = _make_api(
+        {
+            "radios": [
+                {
+                    "id": radio_id,
+                    "radio_type": "modem_tcp",
+                    "modem_tcp": {"host": f"{radio_id}.local", "token": f"{radio_id}-secret"},
+                }
+                for radio_id in ("first", "second")
+            ]
+        }
+    )
+    request.json = {
+        "config": {
+            "radios": [
+                {"id": radio_id, "radio_type": "modem_tcp"} for radio_id in ("second", "first")
+            ]
+        }
+    }
+
+    assert api.config_import()["success"] is True
+    assert api.config["radios"] == [
+        {"id": radio_id, "radio_type": "modem_tcp", "modem_tcp": {"token": f"{radio_id}-secret"}}
+        for radio_id in ("second", "first")
+    ]
+
+
 def test_openapi_success_sets_content_type(cherrypy_ctx):
     _, response = cherrypy_ctx
     api = _make_api()

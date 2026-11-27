@@ -9002,6 +9002,8 @@ class APIEndpoints:
         Sections present in the import will overwrite current values.
         Redacted sentinel values ("*** REDACTED ***") are skipped so that
         existing passwords / keys are preserved.
+        Omitted modem TCP tokens are also preserved; radios must match by id
+        and radio_type. An explicit empty token still clears authentication.
 
         If the import contains a non-redacted identity_key (from a full backup),
         it will be restored.  Redacted or missing identity keys are left unchanged.
@@ -9080,22 +9082,30 @@ class APIEndpoints:
             }
             imported_radios = imported_config.get("radios")
             if isinstance(imported_radios, list):
-                for index, entry in enumerate(imported_radios):
+                for entry in imported_radios:
                     if not isinstance(entry, dict):
                         continue
+                    current_entry = current_radios_by_id.get(entry.get("id"))
+                    if current_entry is not None and (
+                        entry.get("radio_type") is None
+                        or current_entry.get("radio_type") != entry.get("radio_type")
+                    ):
+                        current_entry = None
+                    current_radio_tcp = (
+                        current_entry.get("modem_tcp") if isinstance(current_entry, dict) else None
+                    )
+                    if (
+                        "modem_tcp" not in entry
+                        and isinstance(current_radio_tcp, dict)
+                        and "token" in current_radio_tcp
+                    ):
+                        entry["modem_tcp"] = {"token": current_radio_tcp["token"]}
                     imported_radio_tcp = entry.get("modem_tcp")
                     if not isinstance(imported_radio_tcp, dict) or (
                         "token" in imported_radio_tcp
                         and imported_radio_tcp.get("token") != REDACTED_CONFIG_VALUE
                     ):
                         continue
-                    current_entry = current_radios_by_id.get(entry.get("id"))
-                    if current_entry is None and index < len(current_radios):
-                        candidate = current_radios[index]
-                        current_entry = candidate if isinstance(candidate, dict) else None
-                    current_radio_tcp = (
-                        current_entry.get("modem_tcp") if isinstance(current_entry, dict) else None
-                    )
                     if isinstance(current_radio_tcp, dict) and "token" in current_radio_tcp:
                         imported_radio_tcp["token"] = current_radio_tcp["token"]
                     else:
