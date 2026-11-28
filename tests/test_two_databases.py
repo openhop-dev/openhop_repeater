@@ -76,9 +76,7 @@ def test_volatile_writes_never_touch_the_durable_file(tmp_path):
     handler.store_packet({"timestamp": time.time(), "type": 1, "route": 1, "length": 40})
     handler.set_daemon_state("k", {"v": 1})
     with sqlite3.connect(handler.sqlite_path) as conn:
-        assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master")} >= {
-            "api_tokens"
-        }
+        assert {row[0] for row in conn.execute("SELECT name FROM sqlite_master")} >= {"api_tokens"}
         assert "packets" not in _tables(handler.sqlite_path)
     assert handler.get_daemon_state("k") == {"v": 1}
 
@@ -119,9 +117,7 @@ def test_an_old_single_file_database_keeps_its_durable_rows_and_hides_its_old_vo
     legacy = SQLiteHandler(tmp_path)
     legacy.create_api_token("ci", "hash-1")
     with sqlite3.connect(legacy.sqlite_path) as conn:
-        conn.execute(
-            "CREATE TABLE packets (id INTEGER PRIMARY KEY, timestamp REAL, type INTEGER)"
-        )
+        conn.execute("CREATE TABLE packets (id INTEGER PRIMARY KEY, timestamp REAL, type INTEGER)")
         conn.execute("INSERT INTO packets (timestamp, type) VALUES (1.0, 1)")
     for path in tmp_path.glob("repeater-volatile.db*"):
         path.unlink()

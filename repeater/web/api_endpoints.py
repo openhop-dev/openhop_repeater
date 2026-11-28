@@ -9475,6 +9475,7 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
     def db_purge(self):
         """Purge (empty) one or more database tables.
 
