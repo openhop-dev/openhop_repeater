@@ -176,7 +176,20 @@ def test_openapi_recommendation_is_required_nullable_raw_source():
     assert schema["properties"]["default_interface"]["nullable"] is True
 
 
-def test_collector_does_not_recommend_a_route_absent_from_window(tmp_path):
+@pytest.fixture
+def linux_platform(monkeypatch):
+    """The collector takes no platform argument: simulate Linux for default_interface only.
+
+    Without this, default_interface() returns None on macOS and the collector tests
+    depend on the OS they run on. Only the module's own `sys` is replaced, so the
+    process-wide sys.platform (used by sqlite, psutil...) stays untouched.
+    """
+    from repeater.data_acquisition import default_route
+
+    monkeypatch.setattr(default_route, "sys", SimpleNamespace(platform="linux"))
+
+
+def test_collector_does_not_recommend_a_route_absent_from_window(tmp_path, linux_platform):
     collector = NetworkUsageCollector(
         SQLiteHandler(tmp_path),
         clock=lambda: 120,
@@ -188,7 +201,7 @@ def test_collector_does_not_recommend_a_route_absent_from_window(tmp_path):
     assert collector.snapshot(hours=1)["default_interface"] is None
 
 
-def test_collector_recommends_raw_route_source_from_returned_history(tmp_path):
+def test_collector_recommends_raw_route_source_from_returned_history(tmp_path, linux_platform):
     db = SQLiteHandler(tmp_path)
     db.store_usage_buckets(
         [
