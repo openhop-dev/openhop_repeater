@@ -155,11 +155,15 @@ async def test_overwritten_contact_is_deleted_from_storage(tmp_path):
 
 def test_migration_adds_nullable_advert_blob_without_losing_existing_contacts(tmp_path):
     handler = SQLiteHandler(tmp_path)
-    conn = sqlite3.connect(str(handler.sqlite_path))
-    conn.execute(
+    # Migration markers live in the volatile database; the contacts are durable.
+    volatile = sqlite3.connect(str(handler.volatile_path))
+    volatile.execute(
         "DELETE FROM migrations "
         "WHERE migration_name = 'add_last_advert_packet_to_companion_contacts'"
     )
+    volatile.commit()
+    volatile.close()
+    conn = sqlite3.connect(str(handler.sqlite_path))
     conn.execute("ALTER TABLE companion_contacts RENAME TO companion_contacts_old")
     conn.execute(
         """

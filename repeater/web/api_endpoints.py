@@ -1880,6 +1880,7 @@ class APIEndpoints:
             # which profile applies to which radio of a Fabric.
             stats["radio_profiles"] = self._active_radio_profiles()
             stats["site_name"] = self.config.get("web", {}).get("site_name", "")
+            stats["metrics_storage"] = self._metrics_storage_info()
             stats["version"] = __version__
             try:
                 import openhop_core
@@ -4240,6 +4241,19 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error getting airtime data: {e}")
             return self._error(e)
+
+    def _metrics_storage_info(self) -> dict:
+        """Where the volatile metrics live; never raises (``/api/stats`` must not fail)."""
+        info = {"volatile": False, "path": None, "since": None}
+        try:
+            handler = getattr(self.daemon_instance, "repeater_handler", None)
+            storage = getattr(handler, "storage", None)
+            sqlite_handler = getattr(storage, "sqlite_handler", None)
+            if sqlite_handler is not None:
+                info.update(sqlite_handler.volatile_storage_info())
+        except Exception as e:
+            logger.debug(f"Could not read metrics storage info: {e}")
+        return info
 
     def _active_radio_profiles(self) -> list:
         """Air settings of the radios currently on the air, in configured order.
@@ -9447,7 +9461,7 @@ class APIEndpoints:
             storage = self._get_storage()
             stats = storage.sqlite_handler.get_table_stats()
 
-            rrd_path = storage.sqlite_handler.storage_dir / "metrics.rrd"
+            rrd_path = storage.sqlite_handler.volatile_dir / "metrics.rrd"
             rrd_exists = rrd_path.exists()
             stats["rrd_enabled"] = bool(getattr(storage, "rrd_enabled", True))
             stats["rrd_available"] = bool(getattr(storage, "rrd_handler", None)) and rrd_exists
@@ -9537,9 +9551,9 @@ class APIEndpoints:
         try:
             self._require_post()
             storage = self._get_storage()
-            size_before = storage.sqlite_handler.sqlite_path.stat().st_size
+            size_before = storage.sqlite_handler.database_size_bytes()
             storage.sqlite_handler.vacuum()
-            size_after = storage.sqlite_handler.sqlite_path.stat().st_size
+            size_after = storage.sqlite_handler.database_size_bytes()
             return {
                 "success": True,
                 "data": {

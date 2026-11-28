@@ -1271,7 +1271,7 @@ def test_db_stats_options_success_and_error(cherrypy_ctx, tmp_path):
     rrd.write_bytes(b"123456")
     sqlite_handler = SimpleNamespace(
         get_table_stats=MagicMock(return_value={"packets": {"rows": 10}}),
-        storage_dir=tmp_path,
+        volatile_dir=tmp_path,
     )
     _attach_storage(
         api,
@@ -1290,8 +1290,8 @@ def test_db_stats_options_success_and_error(cherrypy_ctx, tmp_path):
     assert result["data"]["metrics_data_source"] == "rrd"
     assert result["data"]["rrd_size_bytes"] == 6
 
-    sqlite_handler.storage_dir = tmp_path / "missing"
-    sqlite_handler.storage_dir.mkdir()
+    sqlite_handler.volatile_dir = tmp_path / "missing"
+    sqlite_handler.volatile_dir.mkdir()
     _attach_storage(
         api,
         SimpleNamespace(
@@ -1392,18 +1392,16 @@ def test_db_vacuum_options_success_and_error(cherrypy_ctx):
     assert api.db_vacuum() == ""
 
     request.method = "POST"
-    stat_values = [SimpleNamespace(st_size=1000), SimpleNamespace(st_size=700)]
-    sqlite_path = SimpleNamespace(stat=MagicMock(side_effect=stat_values))
-    sqlite_handler = SimpleNamespace(sqlite_path=sqlite_path, vacuum=MagicMock())
+    sqlite_handler = SimpleNamespace(
+        database_size_bytes=MagicMock(side_effect=[1000, 700]), vacuum=MagicMock()
+    )
     _attach_storage(api, SimpleNamespace(sqlite_handler=sqlite_handler))
 
     result = api.db_vacuum()
     assert result["success"] is True
     assert result["data"] == {"size_before": 1000, "size_after": 700, "freed_bytes": 300}
 
-    sqlite_path.stat = MagicMock(
-        side_effect=[SimpleNamespace(st_size=700), SimpleNamespace(st_size=700)]
-    )
+    sqlite_handler.database_size_bytes = MagicMock(side_effect=[700, 700])
     sqlite_handler.vacuum.side_effect = RuntimeError("vacuum failed")
     err = api.db_vacuum()
     assert err["success"] is False

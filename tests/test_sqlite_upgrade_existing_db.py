@@ -86,9 +86,9 @@ def _indexes(path):
 
 @pytest.fixture
 def legacy_db():
-    """A storage dir holding a repeater.db with the pre-migration-13 schema."""
+    """A storage dir holding a repeater-volatile.db with the pre-migration-13 schema."""
     d = tempfile.mkdtemp()
-    path = os.path.join(d, "repeater.db")
+    path = os.path.join(d, "repeater-volatile.db")
     _make_legacy_db(path)
     yield d, path
     shutil.rmtree(d, ignore_errors=True)
@@ -196,7 +196,7 @@ def test_tx_radio_ids_round_trip_through_every_packet_read():
         )
         handler.store_packet({**base, "timestamp": 6.0, "packet_hash": "SINGLE0000000002"})
 
-        con = sqlite3.connect(os.path.join(d, "repeater.db"))
+        con = sqlite3.connect(os.path.join(d, "repeater-volatile.db"))
         try:
             stored = con.execute(
                 "SELECT tx_radio_ids FROM packets WHERE packet_hash = ?", ("FANOUT0000000001",)
@@ -223,7 +223,7 @@ def test_fresh_database_also_gets_column_and_index():
     d = tempfile.mkdtemp()
     try:
         SQLiteHandler(Path(d))
-        path = os.path.join(d, "repeater.db")
+        path = os.path.join(d, "repeater-volatile.db")
         assert {"upstream_hash", "upstream_hash_size"} <= _columns(path)
         assert "idx_packets_upstream_time" in _indexes(path)
     finally:
@@ -269,7 +269,7 @@ def test_fresh_database_airtime_index_covers_radio_ids():
     d = tempfile.mkdtemp()
     try:
         SQLiteHandler(Path(d))
-        path = os.path.join(d, "repeater.db")
+        path = os.path.join(d, "repeater-volatile.db")
         assert _index_columns(path, "idx_packets_airtime") == AIRTIME_INDEX_COLUMNS
     finally:
         shutil.rmtree(d, ignore_errors=True)

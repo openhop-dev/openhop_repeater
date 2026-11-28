@@ -15,7 +15,7 @@ from typing import Callable, Optional
 import cherrypy
 import cherrypy_cors
 
-from repeater.config import resolve_storage_dir
+from repeater.config import resolve_storage_dir, resolve_volatile_dir
 from repeater.data_acquisition import SQLiteHandler
 
 from .api_endpoints import APIEndpoints
@@ -636,9 +636,12 @@ class HTTPStatsServer:
         os.makedirs(storage_dir, exist_ok=True)
 
         # Initialize SQLiteHandler and APITokenManager
-        self.sqlite_handler = SQLiteHandler(Path(storage_dir))
+        volatile_dir = resolve_volatile_dir(self.config, config_path=self.config_path)
+        self.sqlite_handler = SQLiteHandler(Path(storage_dir), volatile_dir=volatile_dir)
         self.token_manager = APITokenManager(self.sqlite_handler, jwt_secret)
-        logger.info(f"API token manager initialized with database at {storage_dir}/repeater.db")
+        logger.info(
+            f"API token manager initialized with database at {self.sqlite_handler.sqlite_path}"
+        )
 
     def _setup_server_cors(self):
         """Set up CORS using cherrypy_cors.install()"""

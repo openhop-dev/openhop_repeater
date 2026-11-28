@@ -330,6 +330,21 @@ paths:
                       type: string
                   sensors:
                     $ref: '#/components/schemas/SensorSummary'
+                  metrics_storage:
+                    type: object
+                    description: Where packets and statistics are stored (repeater-volatile.db, metrics.rrd).
+                    properties:
+                      volatile:
+                        type: boolean
+                        description: True when stored on a RAM-backed filesystem (tmpfs, ramfs), so the data is lost at restart. False when persistent or when detection is impossible.
+                      path:
+                        type: string
+                        nullable: true
+                        example: /dev/shm/openhop_repeater
+                      since:
+                        type: number
+                        nullable: true
+                        description: Unix timestamp of the oldest data available.
 
   /gps:
     get:

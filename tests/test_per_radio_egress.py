@@ -67,7 +67,7 @@ def _diagnostics(store: SQLiteHandler, profiles=None) -> dict:
 
 
 def test_migration_creates_the_table_on_an_existing_database(tmp_path):
-    db = tmp_path / "repeater.db"
+    db = tmp_path / "repeater-volatile.db"
     with sqlite3.connect(db) as conn:
         conn.execute("CREATE TABLE migrations (id INTEGER PRIMARY KEY, migration_name TEXT)")
         conn.commit()
@@ -88,7 +88,7 @@ def test_every_physical_send_is_stored_including_the_failures(handler):
         handler, 7, [_egress("local", attempts=2, backoff=140.0), _egress("link", success=False)]
     )
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         rows = conn.execute(
             "SELECT packet_id, radio_id, success, lbt_attempts, lbt_backoff_ms_total "
             "FROM packet_egress ORDER BY radio_id"
@@ -102,7 +102,7 @@ def test_nothing_is_written_without_a_packet_id_or_rows(handler):
     handler.store_packet_egress(3, BASE_TS, [])
     handler.store_packet_egress(3, BASE_TS, None)
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM packet_egress").fetchone()[0] == 0
 
 
@@ -113,7 +113,7 @@ def test_retention_ages_egress_rows_out_with_their_packets(handler):
 
     handler.cleanup_old_data(days=31)
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         assert [row[0] for row in conn.execute("SELECT packet_id FROM packet_egress")] == [2]
 
 
@@ -123,7 +123,7 @@ def test_purging_packets_takes_their_egress_rows(handler):
 
     handler.purge_table("packets")
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM packet_egress").fetchone()[0] == 0
 
 
@@ -349,7 +349,7 @@ def test_egress_rows_are_written_against_the_stored_packet_id(handler):
 
     collector._record_packet_blocking(record, False, [_egress("local"), _egress("link")])
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         rows = conn.execute("SELECT packet_id, radio_id FROM packet_egress").fetchall()
     assert rows == [(record["id"], "local"), (record["id"], "link")]
 
@@ -373,7 +373,7 @@ def test_a_single_radio_packet_takes_the_path_it_always_did(handler):
 
     collector._record_packet_blocking(record, False)
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM packet_egress").fetchone()[0] == 0
     assert isinstance(record["id"], int)
 
@@ -386,5 +386,5 @@ def test_the_collector_facade_takes_the_egress_rows(handler):
 
     collector.record_packet(record, skip_mqtt=False, tx_egress=[_egress("link")])
 
-    with sqlite3.connect(handler.sqlite_path) as conn:
+    with sqlite3.connect(handler.volatile_path) as conn:
         assert conn.execute("SELECT radio_id FROM packet_egress").fetchone()[0] == "link"

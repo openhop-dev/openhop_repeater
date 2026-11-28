@@ -693,9 +693,14 @@ def _packet_stats_by_radio(groups, resolver: RadioResolver) -> Tuple[dict, dict]
 
 
 class SQLiteHandler:
-    def __init__(self, storage_dir: Path):
+    def __init__(self, storage_dir: Path, volatile_dir: Optional[Path] = None):
         self.storage_dir = storage_dir
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.sqlite_path = self.storage_dir / "repeater.db"
+        # volatile_dir lets the volatile database live elsewhere (e.g. tmpfs) than storage_dir.
+        self.volatile_dir = Path(volatile_dir) if volatile_dir else self.storage_dir
+        self.volatile_dir.mkdir(parents=True, exist_ok=True)
+        self.volatile_path = self.volatile_dir / "repeater-volatile.db"
         self._api_token_last_used_updates = {}
         self._api_token_last_used_interval_sec = 300
         self._hot_cache_ttl_sec = 60
@@ -749,8 +754,16 @@ class SQLiteHandler:
         """
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(str(self.sqlite_path))
-            conn.execute("PRAGMA journal_mode=WAL")
+            # Two databases on one connection. ``main`` is repeater-volatile.db
+            # (packets, stats; may live on tmpfs and start empty at every boot);
+            # ``durable`` is repeater.db (tokens, ACL, transport keys, companion
+            # contacts/channels/prefs; stays on disk). Unqualified table names
+            # resolve in ``main`` first, then ``durable``, so queries are
+            # unchanged; only the DDL of durable tables names its schema.
+            conn = sqlite3.connect(str(self.volatile_path))
+            conn.execute("ATTACH DATABASE ? AS durable", (str(self.sqlite_path),))
+            conn.execute("PRAGMA main.journal_mode=WAL")
+            conn.execute("PRAGMA durable.journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=5000")
             self._local.conn = conn
@@ -1017,7 +1030,7 @@ class SQLiteHandler:
 
                 conn.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS transport_keys (
+                    CREATE TABLE IF NOT EXISTS durable.transport_keys (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL UNIQUE,
                         flood_policy TEXT NOT NULL CHECK (flood_policy IN ('allow', 'deny')),
@@ -1033,7 +1046,7 @@ class SQLiteHandler:
 
                 conn.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS api_tokens (
+                    CREATE TABLE IF NOT EXISTS durable.api_tokens (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL,
                         token_hash TEXT NOT NULL UNIQUE,
@@ -1084,10 +1097,12 @@ class SQLiteHandler:
                     "timestamp, radio_id, success, lbt_attempts, lbt_channel_busy)"
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_transport_keys_name ON transport_keys(name)"
+                    "CREATE INDEX IF NOT EXISTS durable.idx_transport_keys_name "
+                    "ON transport_keys(name)"
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_transport_keys_parent ON transport_keys(parent_id)"
+                    "CREATE INDEX IF NOT EXISTS durable.idx_transport_keys_parent "
+                    "ON transport_keys(parent_id)"
                 )
 
                 # Room server tables
@@ -1149,7 +1164,7 @@ class SQLiteHandler:
                 # firmware keeps it in RAM only, we keep it for the web UI.
                 conn.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS acl_entries (
+                    CREATE TABLE IF NOT EXISTS durable.acl_entries (
                         identity_pubkey TEXT NOT NULL,
                         identity_label TEXT NOT NULL,
                         client_pubkey TEXT NOT NULL,
@@ -1161,7 +1176,8 @@ class SQLiteHandler:
                 """
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_acl_entries_label ON acl_entries(identity_label)"
+                    "CREATE INDEX IF NOT EXISTS durable.idx_acl_entries_label "
+                    "ON acl_entries(identity_label)"
                 )
                 # Added to a table created before last_login, here rather than
                 # in the migrations: the ACL load reads it, and a failed
@@ -1172,7 +1188,10 @@ class SQLiteHandler:
                     logger.info("Added last_login column to acl_entries table")
 
                 conn.commit()
-                logger.info(f"SQLite database initialized: {self.sqlite_path}")
+                logger.info(
+                    f"SQLite databases initialized: durable={self.sqlite_path} "
+                    f"volatile={self.volatile_path}"
+                )
 
         except Exception as e:
             logger.error(f"Failed to initialize SQLite: {e}")
@@ -1262,13 +1281,14 @@ class SQLiteHandler:
                 if not existing:
                     # Check if api_tokens table already exists
                     cursor = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='api_tokens'"
+                        "SELECT name FROM durable.sqlite_master "
+                        "WHERE type='table' AND name='api_tokens'"
                     )
 
                     if not cursor.fetchone():
                         conn.execute(
                             """
-                            CREATE TABLE api_tokens (
+                            CREATE TABLE durable.api_tokens (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 name TEXT NOT NULL,
                                 token_hash TEXT NOT NULL UNIQUE,
@@ -1294,13 +1314,17 @@ class SQLiteHandler:
                 ).fetchone()
 
                 if not existing:
+                    # companion_contacts and companion_channels are durable;
+                    # companion_messages (the delivery queue) is volatile and is
+                    # recreated below on every boot.
                     cursor = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='companion_contacts'"
+                        "SELECT name FROM durable.sqlite_master "
+                        "WHERE type='table' AND name='companion_contacts'"
                     )
                     if not cursor.fetchone():
                         conn.execute(
                             """
-                            CREATE TABLE companion_contacts (
+                            CREATE TABLE durable.companion_contacts (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 companion_hash TEXT NOT NULL,
                                 pubkey BLOB NOT NULL,
@@ -1321,7 +1345,7 @@ class SQLiteHandler:
                         )
                         conn.execute(
                             """
-                            CREATE TABLE companion_channels (
+                            CREATE TABLE durable.companion_channels (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 companion_hash TEXT NOT NULL,
                                 channel_idx INTEGER NOT NULL,
@@ -1332,45 +1356,49 @@ class SQLiteHandler:
                         """
                         )
                         conn.execute(
-                            """
-                            CREATE TABLE companion_messages (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                companion_hash TEXT NOT NULL,
-                                sender_key BLOB NOT NULL,
-                                txt_type INTEGER NOT NULL DEFAULT 0,
-                                timestamp INTEGER NOT NULL DEFAULT 0,
-                                text TEXT NOT NULL,
-                                is_channel INTEGER NOT NULL DEFAULT 0,
-                                channel_idx INTEGER NOT NULL DEFAULT 0,
-                                path_len INTEGER NOT NULL DEFAULT 0,
-                                sender_prefix TEXT NOT NULL DEFAULT '',
-                                snr REAL,
-                                rssi INTEGER,
-                                channel_data_type INTEGER,
-                                channel_data_payload BLOB,
-                                packet_hash TEXT,
-                                created_at REAL NOT NULL
-                            )
+                            "CREATE INDEX IF NOT EXISTS durable.idx_companion_contacts_hash "
+                            "ON companion_contacts(companion_hash)"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS durable.idx_companion_contacts_pubkey "
+                            "ON companion_contacts(companion_hash, pubkey)"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS durable.idx_companion_channels_hash "
+                            "ON companion_channels(companion_hash)"
+                        )
+                        logger.info("Created companion_contacts, companion_channels tables")
+
+                    conn.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS companion_messages (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            companion_hash TEXT NOT NULL,
+                            sender_key BLOB NOT NULL,
+                            txt_type INTEGER NOT NULL DEFAULT 0,
+                            timestamp INTEGER NOT NULL DEFAULT 0,
+                            text TEXT NOT NULL,
+                            is_channel INTEGER NOT NULL DEFAULT 0,
+                            channel_idx INTEGER NOT NULL DEFAULT 0,
+                            path_len INTEGER NOT NULL DEFAULT 0,
+                            sender_prefix TEXT NOT NULL DEFAULT '',
+                            snr REAL,
+                            rssi INTEGER,
+                            channel_data_type INTEGER,
+                            channel_data_payload BLOB,
+                            packet_hash TEXT,
+                            created_at REAL NOT NULL
                         )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_companion_contacts_hash ON companion_contacts(companion_hash)"
-                        )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_companion_contacts_pubkey ON companion_contacts(companion_hash, pubkey)"
-                        )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_companion_channels_hash ON companion_channels(companion_hash)"
-                        )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_companion_messages_hash ON companion_messages(companion_hash)"
-                        )
-                        conn.execute(
-                            "CREATE INDEX IF NOT EXISTS idx_companion_messages_hash_packet ON companion_messages(companion_hash, packet_hash)"
-                        )
-                        logger.info(
-                            "Created companion_contacts, companion_channels, companion_messages tables"
-                        )
+                    """
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_messages_hash "
+                        "ON companion_messages(companion_hash)"
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_companion_messages_hash_packet "
+                        "ON companion_messages(companion_hash, packet_hash)"
+                    )
 
                     conn.execute(
                         "INSERT INTO migrations (migration_name, applied_at) VALUES (?, ?)",
@@ -1388,9 +1416,9 @@ class SQLiteHandler:
 
                 if not existing:
                     # Replace the non-unique index with a UNIQUE one
-                    conn.execute("DROP INDEX IF EXISTS idx_companion_contacts_pubkey")
+                    conn.execute("DROP INDEX IF EXISTS durable.idx_companion_contacts_pubkey")
                     conn.execute(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_contacts_hash_pubkey "
+                        "CREATE UNIQUE INDEX IF NOT EXISTS durable.idx_companion_contacts_hash_pubkey "
                         "ON companion_contacts (companion_hash, pubkey)"
                     )
                     conn.execute(
@@ -1434,12 +1462,13 @@ class SQLiteHandler:
 
                 if not existing:
                     cursor = conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='companion_prefs'"
+                        "SELECT name FROM durable.sqlite_master "
+                        "WHERE type='table' AND name='companion_prefs'"
                     )
                     if not cursor.fetchone():
                         conn.execute(
                             """
-                            CREATE TABLE companion_prefs (
+                            CREATE TABLE durable.companion_prefs (
                                 companion_hash TEXT PRIMARY KEY,
                                 prefs_json TEXT NOT NULL
                             )
@@ -3960,7 +3989,7 @@ class SQLiteHandler:
     def get_table_stats(self) -> dict:
         """Get row counts, date ranges, and storage info for all tables."""
         try:
-            db_size = self.sqlite_path.stat().st_size if self.sqlite_path.exists() else 0
+            db_size = self.database_size_bytes()
 
             tables_with_timestamp = [
                 "packets",
@@ -4004,10 +4033,12 @@ class SQLiteHandler:
             table_info = []
             with self._connect() as conn:
                 # Get actual tables present in the database
+                # Unqualified sqlite_master only lists ``main``: read both schemas.
                 existing = {
                     row[0]
                     for row in conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table'"
+                        "SELECT name FROM main.sqlite_master WHERE type='table' "
+                        "UNION SELECT name FROM durable.sqlite_master WHERE type='table'"
                     ).fetchall()
                 }
 
@@ -4119,11 +4150,48 @@ class SQLiteHandler:
             logger.error(f"Failed to purge table {table_name}: {e}")
             raise
 
-    def vacuum(self):
-        """Reclaim disk space after purging tables."""
+    def database_size_bytes(self) -> int:
+        """Combined size of the durable and volatile database files."""
+        return sum(
+            path.stat().st_size for path in (self.sqlite_path, self.volatile_path) if path.exists()
+        )
+
+    def volatile_storage_info(self) -> dict:
+        """Describe where the volatile metrics live, for ``/api/stats``.
+
+        ``volatile`` is True when ``volatile_dir`` is on a RAM-backed filesystem, so
+        packets and statistics are lost at restart. ``since`` is the Unix timestamp of
+        the oldest data available (oldest packet, else creation time of the database
+        file), or None when unknown.
+        """
+        from repeater.utils.fs import is_volatile_fs
+
+        since = None
         try:
             with self._connect() as conn:
-                conn.execute("VACUUM")
+                row = conn.execute("SELECT MIN(timestamp) FROM packets").fetchone()
+            if row and row[0] is not None:
+                since = float(row[0])
+        except Exception as e:
+            logger.debug(f"Could not read oldest packet timestamp: {e}")
+        if since is None:
+            try:
+                info = self.volatile_path.stat()
+                since = float(getattr(info, "st_birthtime", None) or info.st_mtime)
+            except OSError:
+                since = None
+        return {
+            "volatile": is_volatile_fs(self.volatile_dir),
+            "path": str(self.volatile_dir),
+            "since": since,
+        }
+
+    def vacuum(self):
+        """Reclaim disk space after purging tables (both databases)."""
+        try:
+            with self._connect() as conn:
+                conn.execute("VACUUM main")
+                conn.execute("VACUUM durable")
             logger.info("Database vacuumed successfully")
         except Exception as e:
             logger.error(f"Failed to vacuum database: {e}")

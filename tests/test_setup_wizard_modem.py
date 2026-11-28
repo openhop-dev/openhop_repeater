@@ -7,8 +7,7 @@ repeater/config.py and tests/test_radio_config.py).
 """
 
 import json
-import sys
-import types
+import threading
 
 import cherrypy
 import pytest
@@ -73,10 +72,19 @@ def wizard_env(tmp_path, monkeypatch):
     }
     endpoints = APIEndpoints(config=config, config_path=str(config_path))
 
-    # Stub the post-wizard service restart — we don't want a real systemctl call.
-    fake_service_utils = types.ModuleType("repeater.service_utils")
-    fake_service_utils.restart_service = lambda: None
-    monkeypatch.setitem(sys.modules, "repeater.service_utils", fake_service_utils)
+    # The wizard ends by starting a daemon thread that sleeps 2s, then calls
+    # restart_service(). Stubbing repeater.service_utils is not enough: the stub
+    # is undone when the test ends, long before the thread wakes up, so it ran
+    # the real restart_service(). In a container (/.dockerenv, cgroup) that
+    # schedules os._exit(0), which killed the whole pytest process, with status 0,
+    # during some later unrelated test. Never start the restart thread here.
+    started_targets = []
+
+    class _NoStartThread(threading.Thread):
+        def start(self):
+            started_targets.append(self._target)
+
+    monkeypatch.setattr(threading, "Thread", _NoStartThread)
 
     def _set_request(body):
         # cherrypy.request is a thread-local — populate the bits the handler reads.

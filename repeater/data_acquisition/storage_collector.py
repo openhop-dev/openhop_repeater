@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from repeater.config import build_radio_profiles, resolve_storage_dir
+from repeater.config import build_radio_profiles, resolve_storage_dir, resolve_volatile_dir
 
 from .mqtt_handler import MeshCoreToMqttPusher
 from .network_usage import NetworkUsageCollector
@@ -72,12 +72,16 @@ class StorageCollector:
         self.storage_dir = resolve_storage_dir(config)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        self.sqlite_handler = SQLiteHandler(self.storage_dir)
+        self.sqlite_handler = SQLiteHandler(
+            self.storage_dir, volatile_dir=resolve_volatile_dir(config)
+        )
         self.network_usage = NetworkUsageCollector(self.sqlite_handler)
         self.network_usage.start()
         self.rrd_handler = None
         if self.rrd_enabled:
-            candidate_rrd_handler = RRDToolHandler(self.storage_dir)
+            # Same directory as repeater-volatile.db: its cumulative counters come from
+            # the packets table, so both must restart from zero together.
+            candidate_rrd_handler = RRDToolHandler(self.sqlite_handler.volatile_dir)
             if candidate_rrd_handler.available and candidate_rrd_handler.rrd_path.exists():
                 self.rrd_handler = candidate_rrd_handler
                 logger.info("RRDtool metrics enabled")
@@ -834,7 +838,7 @@ class StorageCollector:
         try:
             import sqlite3
 
-            with sqlite3.connect(self.sqlite_handler.sqlite_path) as conn:
+            with sqlite3.connect(self.sqlite_handler.volatile_path) as conn:
                 result = conn.execute(
                     "SELECT node_name FROM adverts WHERE pubkey = ? AND node_name IS NOT NULL ORDER BY last_seen DESC LIMIT 1",
                     (pubkey,),

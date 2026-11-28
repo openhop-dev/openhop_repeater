@@ -71,7 +71,7 @@ def bridge_db(handler) -> SQLiteHandler:
 
 def test_migration_adds_radio_id_to_an_existing_database(tmp_path):
     """A database written before this work gains the column and its indexes."""
-    db = tmp_path / "repeater.db"
+    db = tmp_path / "repeater-volatile.db"
     with sqlite3.connect(db) as conn:
         conn.execute(
             "CREATE TABLE noise_floor (id INTEGER PRIMARY KEY AUTOINCREMENT, "
